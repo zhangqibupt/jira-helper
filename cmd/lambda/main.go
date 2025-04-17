@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"os"
 
 	"jira_whisperer/internal/handler"
 	"jira_whisperer/internal/logger"
@@ -18,15 +19,17 @@ import (
 var slackHandler *handler.SlackHandler
 
 func init() {
-	// cfg := config.NewConfig()
-
-	// Initialize clients
-	// mcpClient := mcp.NewClient(cfg.MCPAPIKey)
-	// openaiClient := openai.NewClient(cfg.AzureOpenAIKey, cfg.AzureOpenAIEndpoint, cfg.AzureOpenAIDeployment)
-
-	// // Initialize handler
-	// slackHandler = handler.NewSlackHandler(mcpClient, openaiClient)
-
+	var err error
+	slackHandler, err = handler.NewSlackHandler(
+		"xoxb-1234567890",
+		"https://api.openai.com/v1",
+		"sk-1234567890",
+		"gpt-4o",
+	)
+	if err != nil {
+		logger.GetLogger().Error("failed to create slack handler", zap.Error(err))
+		os.Exit(1)
+	}
 }
 
 func handleRequest(req events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {

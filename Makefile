@@ -1,8 +1,6 @@
 .PHONY: build clean test zip all
 
 # Go parameters
-BINARY_NAME=bootstrap
-LAMBDA_HANDLER=cmd/lambda/main.go
 BUILD_DIR=build
 DEPLOYMENT_PACKAGE=$(BUILD_DIR)/function.zip
 
@@ -11,21 +9,18 @@ GOOS=linux
 GOARCH=amd64
 GO_BUILD_FLAGS=-ldflags="-s -w"
 
-# MCP CLI location
-MCP_CLI_PATH=/path/to/mcp  # 需要替换为实际的 MCP CLI 路径
-
 all: clean build zip
 
 build:
+	make clean
 	@echo "Building Lambda function..."
 	@mkdir -p $(BUILD_DIR)
-	GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GO_BUILD_FLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) $(LAMBDA_HANDLER)
+	GOOS=$(GOOS) GOARCH=$(GOARCH) CGO_ENABLED=0  go build $(GO_BUILD_FLAGS) -o $(BUILD_DIR)/bootstrap cmd/lambda/main.go
+	GOOS=$(GOOS) GOARCH=$(GOARCH) CGO_ENABLED=0  go build $(GO_BUILD_FLAGS) -o $(BUILD_DIR)/mcp-server cmd/server/main.go
 
 zip: build
 	@echo "Creating deployment package..."
-	@mkdir -p $(BUILD_DIR)/bin
-	@cp $(MCP_CLI_PATH) $(BUILD_DIR)/bin/mcp
-	@cd $(BUILD_DIR) && zip -r function.zip $(BINARY_NAME) bin/
+	cd $(BUILD_DIR) && zip -r function.zip .
 	@echo "Deployment package created at $(DEPLOYMENT_PACKAGE)"
 
 test:

@@ -31,11 +31,8 @@ type HistoryMessage struct {
 
 func NewSlackHandler(token string, aiEndpoint string, aiKey string, aiDeployment string) (*SlackHandler, error) {
 	mcpClient, err := client.NewStdioMCPClient(
-		"npx",
-		[]string{}, // Empty ENV
-		"-y",
-		"@modelcontextprotocol/server-filesystem",
-		"/tmp",
+		"./bin/mcp",
+		[]string{},
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create MCP client: %v", err)
