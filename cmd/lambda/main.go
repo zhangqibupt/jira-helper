@@ -1,42 +1,16 @@
 package main
 
 import (
-	"encoding/json"
-	"fmt"
-	"os"
-
-	"jira_whisperer/internal/handler"
+	"context"
 	"jira_whisperer/internal/logger"
-
-	"github.com/slack-go/slack/slackevents"
-
 	"log"
+	"os"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
-	"go.uber.org/zap"
+	ginadapter "github.com/awslabs/aws-lambda-go-api-proxy/gin"
+	"github.com/gin-gonic/gin"
 )
-
-var slackHandler *handler.SlackHandler
-
-func initSlackHandler() error {
-	if err := validateRequiredEnvVars(); err != nil {
-		return err
-	}
-
-	var err error
-	slackHandler, err = handler.NewSlackHandler(
-		os.Getenv("SLACK_BOT_TOKEN"),
-		os.Getenv("OPENAI_API_BASE"),
-		os.Getenv("OPENAI_API_KEY"),
-		os.Getenv("OPENAI_MODEL"),
-		os.Getenv("MCP_PATH"),
-	)
-	if err != nil {
-		return err
-	}
-	return nil
-}
 
 func main() {
 	if err := logger.Init("info"); err != nil {
@@ -44,92 +18,41 @@ func main() {
 	}
 	defer logger.Sync()
 
-	if err := initSlackHandler(); err != nil {
-		log.Fatalf("Failed to initialize slack handler: %v", err)
-	}
+	r := RouterEngine()
+	if IsInLambda() {
+		if err := initSlackHandler(); err != nil {
+			log.Fatalf("Failed to initialize slack handler: %v", err)
+		}
 
-	lambda.Start(handleRequest)
+		ginLambda := ginadapter.New(r)
+		rawHandler := func(ctx context.Context, req events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+			return ginLambda.ProxyWithContext(ctx, req)
+		}
+		lambda.Start(rawHandler)
+	} else {
+		os.Setenv("SLACK_BOT_TOKEN", "xoxb-4050481344-8783872636801-4fzL7TQ5iXne8BRIxKVvnmBI")
+		os.Setenv("OPENAI_API_BASE", "https://test-gpt-4o-mini-2.openai.azure.com/")
+		os.Setenv("OPENAI_API_KEY", "743bd60e3c9f4de9a667fdcf0fd342a6")
+		os.Setenv("OPENAI_MODEL", "gpt-4o")
+		os.Setenv("MCP_PATH", "/Users/qzhang/workspace/github/jira_whisperer/build/mcp-server")
+
+		if err := initSlackHandler(); err != nil {
+			log.Fatalf("Failed to initialize slack handler: %v", err)
+		}
+		if err := r.Run("localhost:3000"); err != nil {
+			log.Fatal("Server is shutting down due to ", err)
+		}
+	}
 }
 
-func handleRequest(req events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
-	logger := logger.GetLogger()
-
-	// Verify request body is not empty
-	if req.Body == "" {
-		logger.Error("empty request body")
-		return events.APIGatewayProxyResponse{
-			StatusCode: 400,
-			Body:       "empty request body",
-		}, nil
-	}
-
-	// Parse the Slack event
-	eventsAPIEvent, err := slackevents.ParseEvent(
-		json.RawMessage(req.Body),
-		slackevents.OptionNoVerifyToken(),
-	)
-	if err != nil {
-		logger.Error("failed to parse slack event", zap.Error(err))
-		return events.APIGatewayProxyResponse{
-			StatusCode: 400,
-			Body:       "failed to parse slack event",
-		}, nil
-	}
-
-	// Handle URL verification challenge
-	if eventsAPIEvent.Type == slackevents.URLVerification {
-		var challenge *slackevents.ChallengeResponse
-		if err := json.Unmarshal([]byte(req.Body), &challenge); err != nil {
-			logger.Error("failed to unmarshal challenge", zap.Error(err))
-			return events.APIGatewayProxyResponse{
-				StatusCode: 400,
-				Body:       "failed to parse challenge",
-			}, nil
-		}
-		return events.APIGatewayProxyResponse{
-			StatusCode: 200,
-			Headers: map[string]string{
-				"Content-Type": "text/plain",
-			},
-			Body: req.Body,
-		}, nil
-	}
-
-	// Handle event callbacks
-	if eventsAPIEvent.Type == slackevents.CallbackEvent {
-		innerEvent := eventsAPIEvent.InnerEvent
-		switch event := innerEvent.Data.(type) {
-		case *slackevents.MessageEvent:
-			if err := slackHandler.HandleEvent(event); err != nil {
-				logger.Error("failed to handle message event", zap.Error(err))
-				return events.APIGatewayProxyResponse{
-					StatusCode: 500,
-					Body:       "failed to handle message event",
-				}, nil
-			}
-		}
-	}
-
-	// Return success response
-	return events.APIGatewayProxyResponse{
-		StatusCode: 200,
-		Body:       "ok",
-	}, nil
+func RouterEngine() *gin.Engine {
+	r := gin.New()
+	r.Use(gin.Recovery())
+	r.Use(gin.Logger())
+	r.POST("/", handleRequest)
+	return r
 }
 
-func validateRequiredEnvVars() error {
-	required := []string{
-		"SLACK_BOT_TOKEN",
-		"OPENAI_API_BASE",
-		"OPENAI_API_KEY",
-		"OPENAI_MODEL",
-		"MCP_PATH",
-	}
-
-	for _, env := range required {
-		if os.Getenv(env) == "" {
-			return fmt.Errorf("required environment variable %s is not set", env)
-		}
-	}
-	return nil
+func IsInLambda() bool {
+	return os.Getenv("AWS_LAMBDA_RUNTIME_API") != ""
 }

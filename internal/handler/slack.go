@@ -4,12 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"go.uber.org/zap"
+	"jira_whisperer/internal/logger"
 	"log"
 	"strings"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/ai/azopenai"
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/slack-go/slack"
@@ -63,8 +64,10 @@ func NewSlackHandler(token string, aiEndpoint string, aiKey string, aiDeployment
 	}, nil
 }
 
-func (h *SlackHandler) HandleEvent(ev *slackevents.MessageEvent) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
+const defaultErrorMessage = "Something went wrong while processing your request. Please try again later or contact @qzhang for help."
+
+func (h *SlackHandler) HandleEvent(ev *slackevents.AppMentionEvent) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
 	// Ignore messages from bots to prevent loops
@@ -84,6 +87,8 @@ func (h *SlackHandler) HandleEvent(ev *slackevents.MessageEvent) error {
 		// If the message is in a thread, get the thread history
 		history, err = h.getThreadHistory(ev.Channel, threadTS)
 		if err != nil {
+			_ = h.sendSlackMessage(ev.Channel, defaultErrorMessage, threadTS)
+			logger.GetLogger().Error(fmt.Sprintf("failed to get thread history: %v", err))
 			return fmt.Errorf("failed to get thread history: %v", err)
 		}
 	}
@@ -95,16 +100,20 @@ func (h *SlackHandler) HandleEvent(ev *slackevents.MessageEvent) error {
 	}
 
 	// Post the response in the thread
-	_, _, err = h.api.PostMessage(
-		ev.Channel,
-		slack.MsgOptionText(response, false),
-		slack.MsgOptionTS(threadTS),
-	)
-	if err != nil {
-		return fmt.Errorf("failed to post message: %v", err)
-	}
+	_ = h.sendSlackMessage(ev.Channel, response, threadTS)
 
 	return nil
+}
+
+func (h *SlackHandler) sendSlackMessage(channel string, message string, threadTS string) error {
+	_, _, err := h.api.PostMessage(
+		channel,
+		slack.MsgOptionText(message, false),
+		slack.MsgOptionTS(threadTS))
+	if err != nil {
+		logger.GetLogger().Error(fmt.Sprintf("failed to post message due to %s", err))
+	}
+	return err
 }
 
 // Update processQuery to handle conversation history
@@ -130,10 +139,12 @@ func (h *SlackHandler) processQuery(ctx context.Context, query string, history [
 
 	var finalResponse string
 	for currentRound < maxRounds {
+		logger.GetLogger().Info("sending message to AI", zap.Any("messages", messages))
 		response, err := h.aiClient.ChatWithTools(ctx, messages, openAITools)
 		if err != nil {
 			return "", fmt.Errorf("failed to get chat completion: %v", err)
 		}
+		logger.GetLogger().Info("received response from AI", zap.Any("response", response))
 
 		if response.IsComplete {
 			finalResponse = response.Content
@@ -144,6 +155,7 @@ func (h *SlackHandler) processQuery(ctx context.Context, query string, history [
 		for _, toolCall := range response.ToolCalls {
 			// Execute tool call
 			request := mcp.CallToolRequest{}
+			request.Method = toolCall.Name
 			request.Params.Name = toolCall.Name
 			request.Params.Arguments = toolCall.Args
 
@@ -156,8 +168,9 @@ func (h *SlackHandler) processQuery(ctx context.Context, query string, history [
 			toolCall.Response = result
 
 			// Add tool call result to message history
-			messages = append(messages, &azopenai.ChatRequestFunctionMessage{
-				Content: to.Ptr(response.Content),
+			messages = append(messages, &azopenai.ChatRequestAssistantMessage{
+				Content: azopenai.NewChatRequestAssistantMessageContent(fmt.Sprintf("The tool `%s` was called with arguments `%v`, and the result is: %s",
+					toolCall.Name, toolCall.Args, printToolResult(result))),
 			})
 		}
 
@@ -173,12 +186,24 @@ func (h *SlackHandler) processQuery(ctx context.Context, query string, history [
 	return finalResponse, nil
 }
 
+func printToolResult(result *mcp.CallToolResult) string {
+	for _, content := range result.Content {
+		if textContent, ok := content.(mcp.TextContent); ok {
+			return textContent.Text
+		} else {
+			jsonBytes, _ := json.MarshalIndent(content, "", "  ")
+			return string(jsonBytes)
+		}
+	}
+	return ""
+}
+
 // createInitialMessages creates the initial message list
 func (h *SlackHandler) createInitialMessages(query string, history []HistoryMessage) []azopenai.ChatRequestMessageClassification {
 	// Create system message
 	systemMessage := &azopenai.ChatRequestSystemMessage{
 		Content: azopenai.NewChatRequestSystemMessageContent(
-			"You are a helpful assistant. You have access to tools to help answer questions. " +
+			"You are a helpful slack bot named jira-helper. You have access to jira tools to help answer questions. " +
 				"Use them when appropriate. You can use multiple tools if needed to complete a task. " +
 				"Always explain your actions and the results clearly."),
 	}

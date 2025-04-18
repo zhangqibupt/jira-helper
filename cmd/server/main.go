@@ -3,11 +3,13 @@ package main
 import (
 	"fmt"
 	"log"
+	"os"
 
 	mcpserver "jira_whisperer/internal/service/mcp-server"
 )
 
 func main() {
+	os.Setenv("MCP_GO_LOG_LEVEL", "debug")
 	// Create new MCP server
 	server, err := mcpserver.NewServer()
 	if err != nil {
