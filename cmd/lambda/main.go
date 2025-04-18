@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 
 	"jira_whisperer/internal/handler"
@@ -18,18 +19,36 @@ import (
 
 var slackHandler *handler.SlackHandler
 
-func init() {
+func initSlackHandler() error {
+	if err := validateRequiredEnvVars(); err != nil {
+		return err
+	}
+
 	var err error
 	slackHandler, err = handler.NewSlackHandler(
-		"xoxb-1234567890",
-		"https://api.openai.com/v1",
-		"sk-1234567890",
-		"gpt-4o",
+		os.Getenv("SLACK_BOT_TOKEN"),
+		os.Getenv("OPENAI_API_BASE"),
+		os.Getenv("OPENAI_API_KEY"),
+		os.Getenv("OPENAI_MODEL"),
+		os.Getenv("MCP_PATH"),
 	)
 	if err != nil {
-		logger.GetLogger().Error("failed to create slack handler", zap.Error(err))
-		os.Exit(1)
+		return err
 	}
+	return nil
+}
+
+func main() {
+	if err := logger.Init("info"); err != nil {
+		log.Fatalf("Failed to initialize logger: %v", err)
+	}
+	defer logger.Sync()
+
+	if err := initSlackHandler(); err != nil {
+		log.Fatalf("Failed to initialize slack handler: %v", err)
+	}
+
+	lambda.Start(handleRequest)
 }
 
 func handleRequest(req events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
@@ -98,11 +117,19 @@ func handleRequest(req events.APIGatewayProxyRequest) (events.APIGatewayProxyRes
 	}, nil
 }
 
-func main() {
-	err := logger.Init("info")
-	if err != nil {
-		log.Fatalf("Failed to initialize logger: %v", err)
+func validateRequiredEnvVars() error {
+	required := []string{
+		"SLACK_BOT_TOKEN",
+		"OPENAI_API_BASE",
+		"OPENAI_API_KEY",
+		"OPENAI_MODEL",
+		"MCP_PATH",
 	}
-	defer logger.Sync()
-	lambda.Start(handleRequest)
+
+	for _, env := range required {
+		if os.Getenv(env) == "" {
+			return fmt.Errorf("required environment variable %s is not set", env)
+		}
+	}
+	return nil
 }

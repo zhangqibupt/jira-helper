@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -29,14 +30,26 @@ type HistoryMessage struct {
 	Content string
 }
 
-func NewSlackHandler(token string, aiEndpoint string, aiKey string, aiDeployment string) (*SlackHandler, error) {
+func NewSlackHandler(token string, aiEndpoint string, aiKey string, aiDeployment string, mcpPath string) (*SlackHandler, error) {
 	mcpClient, err := client.NewStdioMCPClient(
-		"./bin/mcp",
+		mcpPath,
 		[]string{},
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create MCP client: %v", err)
 	}
+
+	initRequest := mcp.InitializeRequest{}
+	initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
+	initRequest.Params.ClientInfo = mcp.Implementation{
+		Name:    "test-client",
+		Version: "1.0.0",
+	}
+	initResult, err := mcpClient.Initialize(context.Background(), initRequest)
+	if err != nil {
+		log.Fatalf("Failed to initialize: %v", err)
+	}
+	log.Printf("Successfully initialized client: %v", initResult)
 
 	aiClient, err := openai.NewClient(aiEndpoint, aiKey, aiDeployment)
 	if err != nil {
