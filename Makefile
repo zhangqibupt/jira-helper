@@ -16,7 +16,6 @@ build:
 	@echo "Building Lambda function..."
 	@mkdir -p $(BUILD_DIR)
 	GOOS=$(GOOS) GOARCH=$(GOARCH) CGO_ENABLED=0  go build $(GO_BUILD_FLAGS) -o $(BUILD_DIR)/bootstrap cmd/lambda/main.go
-	GOOS=$(GOOS) GOARCH=$(GOARCH) CGO_ENABLED=0  go build $(GO_BUILD_FLAGS) -o $(BUILD_DIR)/mcp-server cmd/server/main.go
 
 zip: build
 	@echo "Creating deployment package..."

@@ -77,7 +77,8 @@ func (c *Client) ChatWithTools(ctx context.Context, messages []azopenai.ChatRequ
 		})
 	}
 
-	// 发送请求
+	// log message send to AI
+	logger.GetLogger().Warn("sending messages to AI", zap.Any("messages", messages))
 	resp, err := c.client.GetChatCompletions(ctx, azopenai.ChatCompletionsOptions{
 		DeploymentName: to.Ptr(c.deploymentName),
 		Messages:       messages,
@@ -87,6 +88,7 @@ func (c *Client) ChatWithTools(ctx context.Context, messages []azopenai.ChatRequ
 	if err != nil {
 		return nil, fmt.Errorf("failed to get chat completion: %v", err)
 	}
+	logger.GetLogger().Warn("chat completion response", zap.Any("response", resp))
 
 	if len(resp.Choices) == 0 {
 		return nil, fmt.Errorf("no choices returned from chat completion")
