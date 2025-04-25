@@ -40,8 +40,8 @@ func main() {
 	} else {
 		os.Setenv("SLACK_BOT_TOKEN", "xoxb-4050481344-8783872636801-4fzL7TQ5iXne8BRIxKVvnmBI")
 
-		os.Setenv("AZURE_OPENAI_ENDPOINT", "https://test-gpt-4o-mini-2.openai.azure.com/")
-		os.Setenv("AZURE_OPENAI_KEY", "743bd60e3c9f4de9a667fdcf0fd342a6")
+		os.Setenv("AZURE_OPENAI_ENDPOINT", "https://test-gpt-4o-mini-3.openai.azure.com/")
+		os.Setenv("AZURE_OPENAI_KEY", "b26c102d092f4fae91026ba590c27501")
 		os.Setenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
 
 		os.Setenv("TOKEN_BUCKET_NAME", "jira-helper-tokens")

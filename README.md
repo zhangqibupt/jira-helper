@@ -62,7 +62,9 @@ Your personal token will be securely stored and used for all write operations in
 - [ ] Support multipe repied to show thinking logic. maybe just edit the previous message.
 - [ ] Use READ_ONLY_MODE to enable/disable write operations
 - [ ] Remove home page for slack bot
-
+- [ ] Fix token size issue: context length is 128000 tokens
+- [ ] When displaying the issue, translate customized fields to human readable format
+- [ ] Fix the tool call failed but display success message
 ## Usage
 
 [Documentation to be added]
