@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"jira_whisperer/internal/logger"
+	"strings"
 
 	"go.uber.org/zap"
 
@@ -142,7 +143,7 @@ You are a summarization assistant. Your job is to condense lengthy tool results 
 
 Guidelines:
 - Focus on the most important and relevant details for the user's request.
-- Use clean, professional Slack markdown formatting.
+- Use clean, professional formatting.
 - For each item, only include key fields (e.g., key, summary, status, assignee), depend on which field is most relevant to user's request.
 - Remove unnecessary technical details, raw JSON, or verbose metadata.
 - If the content is too long, group or summarize similar items.
@@ -167,7 +168,7 @@ Format your output for direct posting in Slack.
 // Update processQuery to handle conversation history
 func (h *SlackHandler) processQuery(ctx context.Context, query string, history []HistoryMessage, channelID string, threadTS string) (string, error) {
 	// Send initial progress message
-	if err := h.sendMarkdownMessage(channelID, "⏳ Analyzing your request to determine the best way...", threadTS); err != nil {
+	if err := h.sendMarkdownMessage(channelID, "⏳ Analyzing your request to determine the best way to help you...", threadTS); err != nil {
 		logger.GetLogger().Error("failed to send progress message", zap.Error(err))
 	}
 
@@ -177,6 +178,7 @@ func (h *SlackHandler) processQuery(ctx context.Context, query string, history [
 	}
 
 	var openAITools []openai.Tool
+	logger.GetLogger().Info("available tools", zap.Any("tools", tools.Tools))
 	for _, tool := range tools.Tools {
 		schemaBytes, _ := json.Marshal(tool.InputSchema)
 		openAITools = append(openAITools, openai.Tool{
@@ -193,7 +195,6 @@ func (h *SlackHandler) processQuery(ctx context.Context, query string, history [
 
 	var finalResponse string
 	for currentRound < maxRounds {
-		// 裁剪消息，防止过长
 		maxMessages := 21 // 1 system prompt + 20 recent messages
 		if len(messages) > maxMessages {
 			systemPrompt := messages[0:1]
@@ -213,6 +214,10 @@ func (h *SlackHandler) processQuery(ctx context.Context, query string, history [
 			break
 		}
 
+		if response.Content != "" {
+			_ = h.sendMarkdownMessage(channelID, response.Content, threadTS)
+		}
+
 		for _, toolCall := range response.ToolCalls {
 			// Add the tool_calls message to messages first
 			messages = append(messages, &azopenai.ChatRequestAssistantMessage{
@@ -229,9 +234,6 @@ func (h *SlackHandler) processQuery(ctx context.Context, query string, history [
 				},
 			})
 
-			progressMsg := fmt.Sprintf("⚙️ Calling tool *%s* with parameters: ```%s```", toolCall.Name, prettyPrintJSON(toolCall.Args))
-			_ = h.sendMarkdownMessage(channelID, progressMsg, threadTS)
-
 			request := mcp.CallToolRequest{}
 			request.Method = toolCall.Name
 			request.Params.Name = toolCall.Name
@@ -244,7 +246,8 @@ func (h *SlackHandler) processQuery(ctx context.Context, query string, history [
 					ToolCallID: &toolCall.ID,
 					Content:    azopenai.NewChatRequestToolMessageContent(err.Error()),
 				})
-				_ = h.sendMarkdownMessage(channelID, fmt.Sprintf("❌ Error occurred when calling tool *%s*: %v. Please suggest how to handle this error or try an alternative approach.", toolCall.Name, err), threadTS)
+				errorMsg := h.formatToolCallMessage(toolCall.Name, toolCall.Args, "", err)
+				_ = h.sendMarkdownMessage(channelID, errorMsg, threadTS)
 				continue
 			}
 
@@ -256,7 +259,10 @@ func (h *SlackHandler) processQuery(ctx context.Context, query string, history [
 				ToolCallID: &toolCall.ID,
 				Content:    azopenai.NewChatRequestToolMessageContent(toolResultStr),
 			})
-			_ = h.sendMarkdownMessage(channelID, fmt.Sprintf("✅ The tool *%s* was called successfully, response is ```%s```.", toolCall.Name, toolResultStr), threadTS)
+
+			// Send formatted message
+			formattedMsg := h.formatToolCallMessage(toolCall.Name, toolCall.Args, toolResultStr, nil)
+			_ = h.sendMarkdownMessage(channelID, formattedMsg, threadTS)
 		}
 
 		currentRound++
@@ -299,7 +305,7 @@ Your main tasks:
 - For ESC tickets, suggest similar tickets
 
 When using Jira MCP APIs:
-- If you can't find expected information, try specifying fields: *all
+- When using tool jira_get_issue, you should always use fields: *all as parameter
 - When using the search tool, try to use pagination to avoid too many results
 - If batch operations is involved, you should use the batch tool first
 
@@ -311,11 +317,26 @@ Communication guidelines:
 - Ask for clarification if a request is unclear
 - Provide context for search results
 
+Thinking process:
+1. Always explain your thought process before taking any action
+2. When planning to use tools:
+   - Explain why you need to use each tool
+   - Describe what information you expect to get
+   - Outline your plan for using the results
+3. When encountering errors:
+   - Explain what went wrong
+   - Suggest possible solutions
+   - Ask for clarification if needed
+4. When making decisions:
+   - Explain your reasoning
+   - Consider alternatives
+   - Justify your choices
+
 When displaying Jira issue details:
 - Use clean, easy-to-read Slack markdown
 - Make issue keys and URLs clickable
 - Group related information together
-- Highlight important fields like Status and Priority
+- Highlight important fields like Status and Priority using * instead of **
 - Avoid unnecessary markdown and images
 - Use emojis sparingly for emphasis
 - Show dates in a human-readable format
@@ -402,55 +423,6 @@ func (h *SlackHandler) getThreadHistory(channelID, threadTS string) ([]HistoryMe
 	return historyMessages, nil
 }
 
-// formatAIResponseForSlack formats the AI response to be more user-friendly for Slack
-func (h *SlackHandler) formatAIResponseForSlack(ctx context.Context, response string) (string, error) {
-	// Create a formatting prompt
-	formattingPrompt := []azopenai.ChatRequestMessageClassification{
-		&azopenai.ChatRequestSystemMessage{
-			Content: azopenai.NewChatRequestSystemMessageContent(
-				"You are a Slack message formatter. Your job is to take raw responses and decide what to return to the users. If message is just a notification of success or fail, you can just return a user-friendly message. " +
-					"If the result contains data user needs, you need to format them to meet the slack markdown format.\n\n" +
-					"Follow these formatting rules:\n" +
-					"1. Clean and Simple:\n" +
-					"   - Remove unnecessary symbols like underscores, dashes, and extra newlines\n" +
-					"   - Remove redundant section markers (---, ===, etc.)\n" +
-					"   - Keep only one blank line between sections\n" +
-					"2. Headers and Sections:\n" +
-					"   - Use *bold* for section headers\n" +
-					"   - Don't use underscores or dashes for section separation\n" +
-					"   - Format headers as '*Section Name*'\n" +
-					"3. Content Formatting:\n" +
-					"   - Use bullet points (•) instead of dashes for lists\n" +
-					"   - Remove redundant bold markers (**) when not needed\n" +
-					"   - Format field names in bold: '*Field:* Value'\n" +
-					"   - Keep dates and times in their original format\n" +
-					"4. Links and References:\n" +
-					"   - Format Jira tickets as <https://jira.freewheel.tv/browse/TICKET-123|TICKET-123>\n" +
-					"   - Format URLs as <URL|text>\n" +
-					"   - Format email addresses as <mailto:email@domain.com|email@domain.com>\n" +
-					"5. Special Formatting:\n" +
-					"   - Use emojis strategically: 📋 for summaries, 👤 for people, 📅 for dates\n" +
-					"   - Use `code` blocks only for actual code or technical values\n" +
-					"   - Maintain proper spacing around sections\n\n" +
-					"Your output should be clean, professional, and free of unnecessary formatting symbols.",
-			),
-		},
-		&azopenai.ChatRequestUserMessage{
-			Content: azopenai.NewChatRequestUserMessageContent("" + response),
-		},
-	}
-
-	logger.GetLogger().Info("sending formatting prompt to AI", zap.Any("prompt", formattingPrompt))
-	// Get formatted response
-	formattedResponse, err := h.aiClient.Chat(ctx, formattingPrompt)
-	if err != nil {
-		return response, fmt.Errorf("failed to format response: %v", err)
-	}
-	logger.GetLogger().Info("received formatted response from AI", zap.String("formatted_response", formattedResponse))
-
-	return formattedResponse, nil
-}
-
 func ensureValidSchema(schema json.RawMessage) json.RawMessage {
 	var m map[string]interface{}
 	if err := json.Unmarshal(schema, &m); err != nil {
@@ -465,4 +437,254 @@ func ensureValidSchema(schema json.RawMessage) json.RawMessage {
 	}
 	b, _ := json.Marshal(m)
 	return b
+}
+
+// formatToolCallMessage formats tool call messages in a more natural language way
+func (h *SlackHandler) formatToolCallMessage(toolName string, args map[string]interface{}, result string, err error) string {
+	if err != nil {
+		// For error case, use the same format as success but with ❌ emoji
+		switch toolName {
+		case "jira_get_issue":
+			issueKey, _ := args["issue_key"].(string)
+			return fmt.Sprintf("❌ Failed to retrieve details for issue %s: %s", issueKey, err.Error())
+		case "jira_search":
+			jql, _ := args["jql"].(string)
+			return fmt.Sprintf("❌ Failed to search with JQL '%s': %s", jql, err.Error())
+		case "jira_search_fields":
+			keyword, _ := args["keyword"].(string)
+			if keyword != "" {
+				return fmt.Sprintf("❌ Failed to find fields matching '%s': %s", keyword, err.Error())
+			}
+			return fmt.Sprintf("❌ Failed to retrieve available fields: %s", err.Error())
+		case "jira_get_project_issues":
+			projectKey, _ := args["project_key"].(string)
+			return fmt.Sprintf("❌ Failed to retrieve issues for project %s: %s", projectKey, err.Error())
+		case "jira_get_epic_issues":
+			epicKey, _ := args["epic_key"].(string)
+			return fmt.Sprintf("❌ Failed to retrieve issues linked to epic %s: %s", epicKey, err.Error())
+		case "jira_get_transitions":
+			issueKey, _ := args["issue_key"].(string)
+			return fmt.Sprintf("❌ Failed to get transitions for %s: %s", issueKey, err.Error())
+		case "jira_get_worklog":
+			issueKey, _ := args["issue_key"].(string)
+			return fmt.Sprintf("❌ Failed to get worklog for %s: %s", issueKey, err.Error())
+		case "jira_download_attachments":
+			issueKey, _ := args["issue_key"].(string)
+			return fmt.Sprintf("❌ Failed to download attachments from %s: %s", issueKey, err.Error())
+		case "jira_get_agile_boards":
+			boardName, _ := args["board_name"].(string)
+			boardType, _ := args["board_type"].(string)
+			projectKey, _ := args["project_key"].(string)
+			searchCriteria := ""
+			if boardName != "" {
+				searchCriteria += fmt.Sprintf("name: %s, ", boardName)
+			}
+			if boardType != "" {
+				searchCriteria += fmt.Sprintf("type: %s, ", boardType)
+			}
+			if projectKey != "" {
+				searchCriteria += fmt.Sprintf("project: %s, ", projectKey)
+			}
+			return fmt.Sprintf("❌ Failed to retrieve agile boards (%s): %s", strings.TrimRight(searchCriteria, ", "), err.Error())
+		case "jira_get_board_issues":
+			boardId, _ := args["board_id"].(string)
+			return fmt.Sprintf("❌ Failed to retrieve issues from board %s: %s", boardId, err.Error())
+		case "jira_get_sprints_from_board":
+			boardId, _ := args["board_id"].(string)
+			return fmt.Sprintf("❌ Failed to retrieve sprints from board %s: %s", boardId, err.Error())
+		case "jira_create_sprint":
+			sprintName, _ := args["sprint_name"].(string)
+			return fmt.Sprintf("❌ Failed to create sprint '%s': %s", sprintName, err.Error())
+		case "jira_get_sprint_issues":
+			sprintId, _ := args["sprint_id"].(string)
+			return fmt.Sprintf("❌ Failed to retrieve issues from sprint %s: %s", sprintId, err.Error())
+		case "jira_update_sprint":
+			sprintId, _ := args["sprint_id"].(string)
+			return fmt.Sprintf("❌ Failed to update sprint %s: %s", sprintId, err.Error())
+		case "jira_create_issue":
+			issueType, _ := args["issue_type"].(string)
+			projectKey, _ := args["project_key"].(string)
+			return fmt.Sprintf("❌ Failed to create %s in project %s: %s", issueType, projectKey, err.Error())
+		case "jira_batch_create_issues":
+			return fmt.Sprintf("❌ Failed to create issues: %s", err.Error())
+		case "jira_update_issue":
+			issueKey, _ := args["issue_key"].(string)
+			return fmt.Sprintf("❌ Failed to update issue %s: %s", issueKey, err.Error())
+		case "jira_delete_issue":
+			issueKey, _ := args["issue_key"].(string)
+			return fmt.Sprintf("❌ Failed to delete issue %s: %s", issueKey, err.Error())
+		case "jira_add_comment":
+			issueKey, _ := args["issue_key"].(string)
+			return fmt.Sprintf("❌ Failed to add comment to %s: %s", issueKey, err.Error())
+		case "jira_add_worklog":
+			issueKey, _ := args["issue_key"].(string)
+			return fmt.Sprintf("❌ Failed to add worklog to %s: %s", issueKey, err.Error())
+		case "jira_link_to_epic":
+			issueKey, _ := args["issue_key"].(string)
+			epicKey, _ := args["epic_key"].(string)
+			return fmt.Sprintf("❌ Failed to link issue %s to epic %s: %s", issueKey, epicKey, err.Error())
+		case "jira_create_issue_link":
+			inwardIssue, _ := args["inward_issue_key"].(string)
+			outwardIssue, _ := args["outward_issue_key"].(string)
+			linkType, _ := args["link_type"].(string)
+			return fmt.Sprintf("❌ Failed to create %s link between %s and %s: %s", linkType, inwardIssue, outwardIssue, err.Error())
+		case "jira_remove_issue_link":
+			linkId, _ := args["link_id"].(string)
+			return fmt.Sprintf("❌ Failed to remove issue link %s: %s", linkId, err.Error())
+		case "jira_get_link_types":
+			return fmt.Sprintf("❌ Failed to get link types: %s", err.Error())
+		case "jira_transition_issue":
+			issueKey, _ := args["issue_key"].(string)
+			return fmt.Sprintf("❌ Failed to transition issue %s: %s", issueKey, err.Error())
+		default:
+			return fmt.Sprintf("❌ Operation failed: %s", err.Error())
+		}
+	}
+
+	// Success case remains the same
+	switch toolName {
+	case "jira_get_issue":
+		issueKey, _ := args["issue_key"].(string)
+		fields, _ := args["fields"].(string)
+		commentLimit, _ := args["comment_limit"].(int)
+		return fmt.Sprintf("✅ Retrieved details for issue %s (fields: %s, comments: %d) ```%s```", issueKey, fields, commentLimit, result)
+	case "jira_search":
+		jql, _ := args["jql"].(string)
+		limit, _ := args["limit"].(float64)
+		return fmt.Sprintf("✅ Search results for JQL '%s' (limit: %d): ```%s```", jql, int(limit), result)
+	case "jira_search_fields":
+		keyword, _ := args["keyword"].(string)
+		limit, _ := args["limit"].(float64)
+		if keyword != "" {
+			return fmt.Sprintf("✅ Found %d fields matching '%s': ```%s```", int(limit), keyword, result)
+		}
+		return fmt.Sprintf("✅ Retrieved %d available fields: ```%s```", int(limit), result)
+	case "jira_get_project_issues":
+		projectKey, _ := args["project_key"].(string)
+		limit, _ := args["limit"].(float64)
+		return fmt.Sprintf("✅ Retrieved %d issues for project %s: ```%s```", int(limit), projectKey, result)
+	case "jira_get_epic_issues":
+		epicKey, _ := args["epic_key"].(string)
+		limit, _ := args["limit"].(float64)
+		return fmt.Sprintf("✅ Retrieved %d issues linked to epic %s: ```%s```", int(limit), epicKey, result)
+	case "jira_get_transitions":
+		issueKey, _ := args["issue_key"].(string)
+		return fmt.Sprintf("✅ Available status transitions for %s: ```%s```", issueKey, result)
+	case "jira_get_worklog":
+		issueKey, _ := args["issue_key"].(string)
+		return fmt.Sprintf("✅ Worklog entries for %s: ```%s```", issueKey, result)
+	case "jira_download_attachments":
+		issueKey, _ := args["issue_key"].(string)
+		targetDir, _ := args["target_dir"].(string)
+		return fmt.Sprintf("✅ Downloaded attachments from %s to %s: ```%s```", issueKey, targetDir, result)
+	case "jira_get_agile_boards":
+		boardName, _ := args["board_name"].(string)
+		boardType, _ := args["board_type"].(string)
+		projectKey, _ := args["project_key"].(string)
+		limit, _ := args["limit"].(float64)
+		searchCriteria := ""
+		if boardName != "" {
+			searchCriteria += fmt.Sprintf("name: %s, ", boardName)
+		}
+		if boardType != "" {
+			searchCriteria += fmt.Sprintf("type: %s, ", boardType)
+		}
+		if projectKey != "" {
+			searchCriteria += fmt.Sprintf("project: %s, ", projectKey)
+		}
+		return fmt.Sprintf("✅ Retrieved %d agile boards (%s): ```%s```", int(limit), strings.TrimRight(searchCriteria, ", "), result)
+	case "jira_get_board_issues":
+		boardId, _ := args["board_id"].(string)
+		jql, _ := args["jql"].(string)
+		limit, _ := args["limit"].(float64)
+		return fmt.Sprintf("✅ Retrieved %d issues from board %s (JQL: '%s'): ```%s```", int(limit), boardId, jql, result)
+	case "jira_get_sprints_from_board":
+		boardId, _ := args["board_id"].(string)
+		state, _ := args["state"].(string)
+		limit, _ := args["limit"].(float64)
+		if state != "" {
+			return fmt.Sprintf("✅ Retrieved %d %s sprints from board %s: ```%s```", int(limit), state, boardId, result)
+		}
+		return fmt.Sprintf("✅ Retrieved %d sprints from board %s: ```%s```", int(limit), boardId, result)
+	case "jira_create_sprint":
+		sprintName, _ := args["sprint_name"].(string)
+		boardId, _ := args["board_id"].(string)
+		return fmt.Sprintf("✅ Created new sprint '%s' for board %s: ```%s```", sprintName, boardId, result)
+	case "jira_get_sprint_issues":
+		sprintId, _ := args["sprint_id"].(string)
+		limit, _ := args["limit"].(float64)
+		return fmt.Sprintf("✅ Retrieved %d issues from sprint %s: ```%s```", int(limit), sprintId, result)
+	case "jira_update_sprint":
+		sprintId, _ := args["sprint_id"].(string)
+		sprintName, _ := args["sprint_name"].(string)
+		state, _ := args["state"].(string)
+		updates := ""
+		if sprintName != "" {
+			updates += fmt.Sprintf("name: %s, ", sprintName)
+		}
+		if state != "" {
+			updates += fmt.Sprintf("state: %s, ", state)
+		}
+		return fmt.Sprintf("✅ Updated sprint %s (%s): ```%s```", sprintId, strings.TrimRight(updates, ", "), result)
+	case "jira_create_issue":
+		issueType, _ := args["issue_type"].(string)
+		projectKey, _ := args["project_key"].(string)
+		summary, _ := args["summary"].(string)
+		return fmt.Sprintf("✅ Created new %s in project %s: '%s' - ```%s```", issueType, projectKey, summary, result)
+	case "jira_batch_create_issues":
+		issues, _ := args["issues"].(string)
+		var issuesList []map[string]interface{}
+		json.Unmarshal([]byte(issues), &issuesList)
+		return fmt.Sprintf("✅ Created %d issues: ```%s```", len(issuesList), result)
+	case "jira_update_issue":
+		issueKey, _ := args["issue_key"].(string)
+		fields, _ := args["fields"].(string)
+		var fieldsMap map[string]interface{}
+		json.Unmarshal([]byte(fields), &fieldsMap)
+		if epicLink, ok := fieldsMap["customfield_10006"].(string); ok {
+			return fmt.Sprintf("✅ Moved issue %s to epic %s", issueKey, epicLink)
+		}
+		return fmt.Sprintf("✅ Updated issue %s with fields: ```%s```", issueKey, result)
+	case "jira_delete_issue":
+		issueKey, _ := args["issue_key"].(string)
+		return fmt.Sprintf("✅ Deleted issue %s", issueKey)
+	case "jira_add_comment":
+		issueKey, _ := args["issue_key"].(string)
+		comment, _ := args["comment"].(string)
+		return fmt.Sprintf("✅ Added comment to %s: %s", issueKey, comment)
+	case "jira_add_worklog":
+		issueKey, _ := args["issue_key"].(string)
+		timeSpent, _ := args["time_spent"].(string)
+		comment, _ := args["comment"].(string)
+		msg := fmt.Sprintf("✅ Added worklog (%s) to %s", timeSpent, issueKey)
+		if comment != "" {
+			msg += fmt.Sprintf(" with comment: %s", comment)
+		}
+		return msg
+	case "jira_link_to_epic":
+		issueKey, _ := args["issue_key"].(string)
+		epicKey, _ := args["epic_key"].(string)
+		return fmt.Sprintf("✅ Linked issue %s to epic %s", issueKey, epicKey)
+	case "jira_create_issue_link":
+		inwardIssue, _ := args["inward_issue_key"].(string)
+		outwardIssue, _ := args["outward_issue_key"].(string)
+		linkType, _ := args["link_type"].(string)
+		return fmt.Sprintf("✅ Created %s link between %s and %s", linkType, inwardIssue, outwardIssue)
+	case "jira_remove_issue_link":
+		linkId, _ := args["link_id"].(string)
+		return fmt.Sprintf("✅ Removed issue link %s", linkId)
+	case "jira_get_link_types":
+		return fmt.Sprintf("✅ Available link types: %s", result)
+	case "jira_transition_issue":
+		issueKey, _ := args["issue_key"].(string)
+		transitionId, _ := args["transition_id"].(string)
+		comment, _ := args["comment"].(string)
+		msg := fmt.Sprintf("✅ Transitioned issue %s (transition ID: %s)", issueKey, transitionId)
+		if comment != "" {
+			msg += fmt.Sprintf(" with comment: %s", comment)
+		}
+		return msg
+	default:
+		return fmt.Sprintf("✅ Operation completed: %s", result)
+	}
 }

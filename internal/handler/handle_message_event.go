@@ -3,10 +3,11 @@ package handler
 import (
 	"context"
 	"fmt"
-	"github.com/slack-go/slack/slackevents"
 	"jira_whisperer/internal/logger"
 	"strings"
 	"time"
+
+	"github.com/slack-go/slack/slackevents"
 )
 
 // handleMessageEvent handles direct messages and channel messages that mention the bot

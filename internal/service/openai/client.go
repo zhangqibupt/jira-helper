@@ -100,6 +100,9 @@ func (c *Client) ChatWithTools(ctx context.Context, messages []azopenai.ChatRequ
 	response := &ChatResponse{
 		IsComplete: true, // Default to complete
 	}
+	if choice.Message != nil && choice.Message.Content != nil {
+		response.Content = *choice.Message.Content
+	}
 
 	// Handle tool calls as before...
 	if len(choice.Message.ToolCalls) > 0 {
