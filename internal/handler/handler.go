@@ -5,11 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"jira_whisperer/internal/logger"
-	"strings"
 
 	"go.uber.org/zap"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/ai/azopenai"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/gin-gonic/gin"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/slack-go/slack"
@@ -128,6 +128,42 @@ func prettyPrintJSON(v interface{}) string {
 	return string(prettyJSON)
 }
 
+// summarizeIfTooLong checks if the content is too long and summarizes it using the AI model if necessary.
+func (h *SlackHandler) summarizeIfTooLong(ctx context.Context, content string) (string, error) {
+	maxLen := 2000 // character threshold for summarization
+	if len(content) <= maxLen {
+		return content, nil
+	}
+
+	summaryPrompt := []azopenai.ChatRequestMessageClassification{
+		&azopenai.ChatRequestSystemMessage{
+			Content: azopenai.NewChatRequestSystemMessageContent(`
+You are a summarization assistant. Your job is to condense lengthy tool results into concise, key information that is easy to read in Slack.
+
+Guidelines:
+- Focus on the most important and relevant details for the user's request.
+- Use clean, professional Slack markdown formatting.
+- For each item, only include key fields (e.g., key, summary, status, assignee), depend on which field is most relevant to user's request.
+- Remove unnecessary technical details, raw JSON, or verbose metadata.
+- If the content is too long, group or summarize similar items.
+- Always keep the summary under 3000 characters if possible.
+- Add a note if some content is omitted due to length.
+
+Format your output for direct posting in Slack.
+			`),
+		},
+		&azopenai.ChatRequestUserMessage{
+			Content: azopenai.NewChatRequestUserMessageContent(content),
+		},
+	}
+	summarized, err := h.aiClient.Chat(ctx, summaryPrompt)
+	if err != nil || summarized == "" {
+		// If summarization fails, return the original content
+		return content, err
+	}
+	return summarized, nil
+}
+
 // Update processQuery to handle conversation history
 func (h *SlackHandler) processQuery(ctx context.Context, query string, history []HistoryMessage, channelID string, threadTS string) (string, error) {
 	// Send initial progress message
@@ -142,22 +178,32 @@ func (h *SlackHandler) processQuery(ctx context.Context, query string, history [
 
 	var openAITools []openai.Tool
 	for _, tool := range tools.Tools {
+		schemaBytes, _ := json.Marshal(tool.InputSchema)
 		openAITools = append(openAITools, openai.Tool{
 			Name:        tool.Name,
 			Description: tool.Description,
-			Parameters:  string(mustMarshal(tool.InputSchema)),
+			Parameters:  string(ensureValidSchema(json.RawMessage(schemaBytes))),
 		})
 	}
 
 	messages := h.createInitialMessages(query, history)
 
-	maxRounds := 10
+	maxRounds := 20
 	currentRound := 0
 
 	var finalResponse string
 	for currentRound < maxRounds {
+		// 裁剪消息，防止过长
+		maxMessages := 21 // 1 system prompt + 20 recent messages
+		if len(messages) > maxMessages {
+			systemPrompt := messages[0:1]
+			rest := messages[len(messages)-20:]
+			messages = append(systemPrompt, rest...)
+		}
+
 		response, err := h.aiClient.ChatWithTools(ctx, messages, openAITools)
 		if err != nil {
+			_ = h.sendMarkdownMessage(channelID, fmt.Sprintf("❌ Error occurred when processing your request: %s", defaultErrorMessage), threadTS)
 			return "", fmt.Errorf("failed to get chat completion: %v", err)
 		}
 		logger.GetLogger().Info("received response from AI", zap.Any("response", response))
@@ -167,9 +213,23 @@ func (h *SlackHandler) processQuery(ctx context.Context, query string, history [
 			break
 		}
 
-		var toolResults []string
-		for i, toolCall := range response.ToolCalls {
-			progressMsg := fmt.Sprintf("⚙️ Step %d/%d: `%s` with parameters: ```%s```", i+1, len(response.ToolCalls), toolCall.Name, prettyPrintJSON(toolCall.Args))
+		for _, toolCall := range response.ToolCalls {
+			// Add the tool_calls message to messages first
+			messages = append(messages, &azopenai.ChatRequestAssistantMessage{
+				Content: azopenai.NewChatRequestAssistantMessageContent(""),
+				ToolCalls: []azopenai.ChatCompletionsToolCallClassification{
+					&azopenai.ChatCompletionsFunctionToolCall{
+						ID:   to.Ptr(toolCall.ID),
+						Type: to.Ptr("function"),
+						Function: &azopenai.FunctionCall{
+							Name:      to.Ptr(toolCall.Name),
+							Arguments: to.Ptr(prettyPrintJSON(toolCall.Args)),
+						},
+					},
+				},
+			})
+
+			progressMsg := fmt.Sprintf("⚙️ Calling tool *%s* with parameters: ```%s```", toolCall.Name, prettyPrintJSON(toolCall.Args))
 			_ = h.sendMarkdownMessage(channelID, progressMsg, threadTS)
 
 			request := mcp.CallToolRequest{}
@@ -179,21 +239,24 @@ func (h *SlackHandler) processQuery(ctx context.Context, query string, history [
 
 			result, err := h.mcpClient.CallTool(ctx, request)
 			if err != nil {
-				messages = append(messages, &azopenai.ChatRequestUserMessage{
-					Content: azopenai.NewChatRequestUserMessageContent(fmt.Sprintf("Error occurred when calling tool *%s*: %v. Please suggest how to handle this error or try an alternative approach.", toolCall.Name, err)),
+				// Add the error as a user message instead of a tool message
+				messages = append(messages, &azopenai.ChatRequestToolMessage{
+					ToolCallID: &toolCall.ID,
+					Content:    azopenai.NewChatRequestToolMessageContent(err.Error()),
 				})
 				_ = h.sendMarkdownMessage(channelID, fmt.Sprintf("❌ Error occurred when calling tool *%s*: %v. Please suggest how to handle this error or try an alternative approach.", toolCall.Name, err), threadTS)
 				continue
 			}
 
-			toolCall.Response = result
-			toolResults = append(toolResults, fmt.Sprintf("%s: %s", toolCall.Name, printToolResult(result)))
-			response := fmt.Sprintf("The tool *%s* was called with arguments ```%v``` successfully, the result is: %s", toolCall.Name, prettyPrintJSON(toolCall.Args), printToolResult(result))
+			toolResultStr := printToolResult(result)
+			toolResultStr, _ = h.summarizeIfTooLong(ctx, toolResultStr)
 
-			messages = append(messages, &azopenai.ChatRequestUserMessage{
-				Content: azopenai.NewChatRequestUserMessageContent(response),
+			// Add the tool response as a tool message
+			messages = append(messages, &azopenai.ChatRequestToolMessage{
+				ToolCallID: &toolCall.ID,
+				Content:    azopenai.NewChatRequestToolMessageContent(toolResultStr),
 			})
-			_ = h.sendMarkdownMessage(channelID, fmt.Sprintf("✅ The tool *%s* was called successfully, response is ```%s```.", toolCall.Name, printToolResult(result)), threadTS)
+			_ = h.sendMarkdownMessage(channelID, fmt.Sprintf("✅ The tool *%s* was called successfully, response is ```%s```.", toolCall.Name, toolResultStr), threadTS)
 		}
 
 		currentRound++
@@ -202,24 +265,11 @@ func (h *SlackHandler) processQuery(ctx context.Context, query string, history [
 			warningMsg := "⚠️ Reached maximum number of steps. Providing partial response based on current progress..."
 			_ = h.sendMarkdownMessage(channelID, warningMsg, threadTS)
 
-			partialResponse := fmt.Sprintf("Reached maximum conversation rounds. Last response: %s\nTool results: %s",
-				response.Content, strings.Join(toolResults, "\n"))
-			//formattedResponse, err := h.formatAIResponseForSlack(ctx, partialResponse)
-			//if err != nil {
-			//	logger.GetLogger().Error("failed to format partial response", zap.Error(err))
-			//	return partialResponse, nil
-			//}
+			partialResponse := fmt.Sprintf("Reached maximum conversation rounds. Last response: %s", response.Content)
 			return partialResponse, nil
 		}
 	}
-
-	formattedResponse, err := h.formatAIResponseForSlack(ctx, finalResponse)
-	if err != nil {
-		logger.GetLogger().Error("failed to format final response", zap.Error(err))
-		return finalResponse, nil
-	}
-
-	return formattedResponse, nil
+	return finalResponse, nil
 }
 
 func printToolResult(result *mcp.CallToolResult) string {
@@ -239,52 +289,44 @@ func (h *SlackHandler) createInitialMessages(query string, history []HistoryMess
 	// Create system message
 	systemMessage := &azopenai.ChatRequestSystemMessage{
 		Content: azopenai.NewChatRequestSystemMessageContent(
-			`You are a specialized Jira assistant, designed to help users manage and interact with Jira issues, projects, and workflows effectively. You have access to various Jira-related tools through the MCP server that allow you to perform actions like searching issues, creating tickets, managing epics, and more.
+			`You are a Jira assistant that helps users manage Jira issues, projects, and workflows using tools provided by the MCP server.
 
-		Your primary responsibilities:
+Your main tasks:
+- Create, update, and search for Jira issues
+- Manage epics and link issues to epics
+- Guide users through issue transitions and workflows
+- Retrieve and summarize issue details, comments, and worklogs
+- For ESC tickets, suggest similar tickets
 
-		1. Issue Management
-		- Help users create, update, and search for Jira issues
-		- Assist with epic management and linking issues to epics
-		- Guide users through issue transitions and workflow states
-		- Help retrieve and analyze issue details, comments, and worklog entries
-		- For ESC ticket, you can search simliar tickets to provide suggestions.
+When using Jira MCP APIs:
+- If you can't find expected information, try specifying fields: *all
+- When using the search tool, try to use pagination to avoid too many results
+- If batch operations is involved, you should use the batch tool first
 
-		When using Jira MCP APIs, ensure the following:
-		- When you try to get jira issue, if you can not find expeceted information, you can try specifying fields: *all.
+Communication guidelines:
+- Be professional and clear
+- Use Slack markdown for formatting
+- Always include clickable Jira issue keys (e.g., <https://jira.freewheel.tv/browse/PROJ-123|PROJ-123>)
+- Explain your actions before performing them
+- Ask for clarification if a request is unclear
+- Provide context for search results
 
-		Communication Guidelines:
-		1. Be professional and clear in your responses
-		2. Use slack markdown formatting for better readability
-		3. When referencing Jira issues, always include the issue key (e.g., PROJ-123) as a clickable link
-		4. Explain your actions before performing them
-		5. If a request is unclear, ask for clarification
-		6. Provide context when displaying search results
+When displaying Jira issue details:
+- Use clean, easy-to-read Slack markdown
+- Make issue keys and URLs clickable
+- Group related information together
+- Highlight important fields like Status and Priority
+- Avoid unnecessary markdown and images
+- Use emojis sparingly for emphasis
+- Show dates in a human-readable format
 
-		When displaying Jira issue details:
-		1. Format the output in a clean, easy-to-read way using slack markdown format
-		2. Make issue keys and URLs clickable links
-		3. Group related information together
-		4. Highlight important fields like Status and Priority
-		5. Remove unnecessary markdown symbols and formatting
-		6. Skip avatar images and other non-essential visual elements
-		7. Use emojis sparingly to highlight key information
-		8. Present dates in a human-readable format
+Error handling:
+- If unsure, gather more information or ask the user
+- Prefer finding answers yourself before asking the user
+- For epics, "Epic Link" refers to the epic an issue is linked to (customfield_10006)
 
-		Error Handling:
-		1. If you are unsure about the answer to the USER's request or how to satiate their request, you should gather more information. This can be done by asking the USER for more information.
-		2. Bias towards not asking the user for help if you can find the answer yourself.
-		3. When we are talking about epic, "Epic Link" is used to represent the epic that the issue is linked to. The customfield_10006 is used to represent it.
-		Start each interaction by understanding the user's needs and then utilize the appropriate tools to help them achieve their goals.
-`),
+Start by understanding the user's needs, then use the appropriate tools to help them.`),
 	}
-
-	//Please respond using only Slack-compatible Markdown syntax. This will be rendered inside a Slack Block Kit message using slack.NewTextBlockObject(slack.MarkdownType, ...), so your response must strictly follow Slack's supported Markdown rules:
-	//1. Use *bold*, _italic_, and ~strikethrough~ only — no other formatting styles like #, ###, __, or backticks.
-	//2. Use \n to break lines manually.
-	//3. Use > to create block quotes (optional).
-	//4. Use - or • for bullet lists.
-	//5. Use <https://url|display_text> to format links.
 
 	// Create message array
 	var messages []azopenai.ChatRequestMessageClassification
@@ -327,7 +369,7 @@ func (h *SlackHandler) getThreadHistory(channelID, threadTS string) ([]HistoryMe
 	params := &slack.GetConversationRepliesParameters{
 		ChannelID: channelID,
 		Timestamp: threadTS,
-		Limit:     100, // messages per page
+		Limit:     20, // messages per page
 	}
 
 	for {
@@ -407,4 +449,20 @@ func (h *SlackHandler) formatAIResponseForSlack(ctx context.Context, response st
 	logger.GetLogger().Info("received formatted response from AI", zap.String("formatted_response", formattedResponse))
 
 	return formattedResponse, nil
+}
+
+func ensureValidSchema(schema json.RawMessage) json.RawMessage {
+	var m map[string]interface{}
+	if err := json.Unmarshal(schema, &m); err != nil {
+		// fallback: return {"type":"object","properties":{}}
+		return json.RawMessage(`{"type":"object","properties":{}}`)
+	}
+	if m["type"] != "object" {
+		m["type"] = "object"
+	}
+	if _, ok := m["properties"]; !ok {
+		m["properties"] = map[string]interface{}{}
+	}
+	b, _ := json.Marshal(m)
+	return b
 }

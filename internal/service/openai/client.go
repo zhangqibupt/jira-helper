@@ -67,23 +67,25 @@ type ChatResponse struct {
 }
 
 func (c *Client) ChatWithTools(ctx context.Context, messages []azopenai.ChatRequestMessageClassification, tools []Tool) (*ChatResponse, error) {
-	// 转换工具为 Azure OpenAI 格式
-	var azureTools []azopenai.FunctionDefinition
+	// Convert tools to Azure OpenAI ToolDefinition format
+	var azureTools []azopenai.ChatCompletionsToolDefinitionClassification
 	for _, tool := range tools {
-		azureTools = append(azureTools, azopenai.FunctionDefinition{
-			Name:        to.Ptr(tool.Name),
-			Description: to.Ptr(tool.Description),
-			Parameters:  []byte(tool.Parameters),
+		azureTools = append(azureTools, &azopenai.ChatCompletionsFunctionToolDefinition{
+			Function: &azopenai.ChatCompletionsFunctionToolDefinitionFunction{
+				Name:        to.Ptr(tool.Name),
+				Description: to.Ptr(tool.Description),
+				Parameters:  []byte(tool.Parameters),
+			},
 		})
 	}
 
-	// log message send to AI
+	// Log message sent to AI
 	logger.GetLogger().Warn("sending messages to AI", zap.Any("messages", messages))
 	resp, err := c.client.GetChatCompletions(ctx, azopenai.ChatCompletionsOptions{
 		DeploymentName: to.Ptr(c.deploymentName),
 		Messages:       messages,
 		N:              to.Ptr[int32](1),
-		Functions:      azureTools,
+		Tools:          azureTools,
 	}, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get chat completion: %v", err)
@@ -96,26 +98,12 @@ func (c *Client) ChatWithTools(ctx context.Context, messages []azopenai.ChatRequ
 
 	choice := resp.Choices[0]
 	response := &ChatResponse{
-		IsComplete: true, // 默认为完成
+		IsComplete: true, // Default to complete
 	}
 
-	// 处理工具调用
-	if choice.Message.FunctionCall != nil || len(choice.Message.ToolCalls) > 0 {
-		response.IsComplete = false // 有工具调用，标记为未完成
-
-		// 处理旧版 FunctionCall
-		if choice.Message.FunctionCall != nil {
-			var args map[string]interface{}
-			if err := json.Unmarshal([]byte(*choice.Message.FunctionCall.Arguments), &args); err != nil {
-				return nil, fmt.Errorf("failed to parse function arguments: %v", err)
-			}
-			response.ToolCalls = append(response.ToolCalls, ToolCall{
-				Name: *choice.Message.FunctionCall.Name,
-				Args: args,
-			})
-		}
-
-		// 处理新版 ToolCalls
+	// Handle tool calls as before...
+	if len(choice.Message.ToolCalls) > 0 {
+		response.IsComplete = false // Mark as incomplete if there are tool calls
 		for _, call := range choice.Message.ToolCalls {
 			switch v := call.(type) {
 			case *azopenai.ChatCompletionsFunctionToolCall:
@@ -128,7 +116,7 @@ func (c *Client) ChatWithTools(ctx context.Context, messages []azopenai.ChatRequ
 					Name: *v.Function.Name,
 					Args: args,
 				})
-			// if not match, railse error
+			// if not match, raise error
 			default:
 				logger.GetLogger().Error("unknown tool call", zap.Any("tool", v))
 			}
