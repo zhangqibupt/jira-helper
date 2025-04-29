@@ -22,7 +22,7 @@ func (h *SlackHandler) HandleSetupPersonalToken(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		logger.GetLogger().Error("invalid request body", zap.Error(err))
 
-		_ = h.sendEphemeralSlackMessage(req.ChannelID, defaultErrorMessage, "")
+		_ = h.sendEphemeralSlackMessage(req.ChannelID, fmt.Sprintf(defaultErrorMessage, err.Error()), "")
 		c.JSON(http.StatusOK, gin.H{"error": "Invalid request body"})
 		return
 	}

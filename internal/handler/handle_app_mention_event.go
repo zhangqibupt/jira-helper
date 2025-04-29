@@ -3,9 +3,10 @@ package handler
 import (
 	"context"
 	"fmt"
-	"github.com/slack-go/slack/slackevents"
 	"jira_whisperer/internal/logger"
 	"time"
+
+	"github.com/slack-go/slack/slackevents"
 )
 
 // handleAppMentionEvent handles app mention events
@@ -30,7 +31,7 @@ func (h *SlackHandler) handleAppMentionEvent(ev *slackevents.AppMentionEvent) er
 		// If the message is in a thread, get the thread history
 		history, err = h.getThreadHistory(ev.Channel, threadTS)
 		if err != nil {
-			_ = h.sendMarkdownMessage(ev.Channel, defaultErrorMessage, threadTS)
+			_ = h.sendMarkdownMessage(ev.Channel, fmt.Sprintf(defaultErrorMessage, err.Error()), threadTS)
 			logger.GetLogger().Error(fmt.Sprintf("failed to get thread history: %v", err))
 			return fmt.Errorf("failed to get thread history: %v", err)
 		}

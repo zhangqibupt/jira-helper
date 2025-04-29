@@ -79,7 +79,7 @@ func (h *SlackHandler) HandleRequest(c *gin.Context) {
 	c.JSON(200, gin.H{"status": "ok"})
 }
 
-const defaultErrorMessage = "Something went wrong while processing your request. Please try again later or contact @qzhang for help."
+const defaultErrorMessage = "Something went wrong while processing your request. Please try again later or contact @qzhang for help. Error: %s"
 
 func (h *SlackHandler) sendSlackMessage(channel string, message string, threadTS string) error {
 	_, _, err := h.api.PostMessage(
@@ -200,10 +200,7 @@ func (h *SlackHandler) processQuery(ctx context.Context, query string, history [
 
 	tools, err := h.mcpClient.ListTools(ctx, mcp.ListToolsRequest{})
 	if err != nil {
-		title, content := h.formatToolCallMessage("list_tools", nil, "", err)
-		blocks := h.createCollapsibleBlocks(title, content, true)
-		_ = h.updateMessage(channelID, timestamp, "")
-		_, _ = h.sendBlockKitMessage(channelID, threadTS, blocks)
+		h.sendMarkdownMessage(channelID, fmt.Sprintf(defaultErrorMessage, err.Error()), threadTS)
 		return "", fmt.Errorf("failed to list tools: %v", err)
 	}
 
@@ -234,10 +231,7 @@ func (h *SlackHandler) processQuery(ctx context.Context, query string, history [
 
 		response, err := h.aiClient.ChatWithTools(ctx, messages, openAITools)
 		if err != nil {
-			title, content := h.formatToolCallMessage("chat", nil, "", err)
-			blocks := h.createCollapsibleBlocks(title, content, true)
-			_ = h.updateMessage(channelID, timestamp, "")
-			_, _ = h.sendBlockKitMessage(channelID, threadTS, blocks)
+			_ = h.sendMarkdownMessage(channelID, fmt.Sprintf(defaultErrorMessage, err.Error()), threadTS)
 			return "", fmt.Errorf("failed to get chat completion: %v", err)
 		}
 		logger.GetLogger().Info("received response from AI", zap.Any("response", response))
@@ -288,9 +282,8 @@ func (h *SlackHandler) processQuery(ctx context.Context, query string, history [
 					ToolCallID: &toolCall.ID,
 					Content:    azopenai.NewChatRequestToolMessageContent(err.Error()),
 				})
-				title, content := h.formatToolCallMessage(toolCall.Name, toolCall.Args, "", err)
-				blocks := h.createCollapsibleBlocks(title, content, true)
-				_ = h.updateMessage(channelID, timestamp, "")
+				title := h.formatToolCallMessage(toolCall.Name, toolCall.Args, err)
+				blocks := h.createCollapsibleBlocks(title, formatCallToolResult(err.Error()), true)
 				_, _ = h.sendBlockKitMessage(channelID, threadTS, blocks)
 				continue
 			}
@@ -304,9 +297,8 @@ func (h *SlackHandler) processQuery(ctx context.Context, query string, history [
 				Content:    azopenai.NewChatRequestToolMessageContent(toolResultStr),
 			})
 
-			title, content := h.formatToolCallMessage(toolCall.Name, toolCall.Args, toolResultStr, nil)
-			blocks := h.createCollapsibleBlocks(title, content, false)
-			_ = h.updateMessage(channelID, timestamp, "")
+			title := h.formatToolCallMessage(toolCall.Name, toolCall.Args, nil)
+			blocks := h.createCollapsibleBlocks(title, formatCallToolResult(toolResultStr), false)
 			_, _ = h.sendBlockKitMessage(channelID, threadTS, blocks)
 		}
 
@@ -323,6 +315,14 @@ func (h *SlackHandler) processQuery(ctx context.Context, query string, history [
 	}
 
 	return finalResponse, nil
+}
+
+func formatCallToolResult(result string) string {
+	lines := strings.Split(result, "\n")
+	for i, line := range lines {
+		lines[i] = fmt.Sprintf(">_%s_", line)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func printToolResult(result *mcp.CallToolResult) string {
@@ -489,37 +489,37 @@ func ensureValidSchema(schema json.RawMessage) json.RawMessage {
 }
 
 // formatToolCallMessage formats tool call messages in a more natural language way
-func (h *SlackHandler) formatToolCallMessage(toolName string, args map[string]interface{}, result string, err error) (title string, content string) {
+func (h *SlackHandler) formatToolCallMessage(toolName string, args map[string]interface{}, err error) (title string) {
 	if err != nil {
 		// For error case
 		switch toolName {
 		case "jira_get_issue":
 			issueKey, _ := args["issue_key"].(string)
-			return fmt.Sprintf("Failed to retrieve details for issue %s", issueKey), err.Error()
+			return fmt.Sprintf("Failed to retrieve details for issue %s", issueKey)
 		case "jira_search":
 			jql, _ := args["jql"].(string)
-			return fmt.Sprintf("Failed to search with JQL '%s'", jql), err.Error()
+			return fmt.Sprintf("Failed to search with JQL '%s'", jql)
 		case "jira_search_fields":
 			keyword, _ := args["keyword"].(string)
 			if keyword != "" {
-				return fmt.Sprintf("Failed to find fields matching '%s'", keyword), err.Error()
+				return fmt.Sprintf("Failed to find fields matching '%s'", keyword)
 			}
-			return fmt.Sprintf("Failed to retrieve available fields"), err.Error()
+			return fmt.Sprintf("Failed to retrieve available fields")
 		case "jira_get_project_issues":
 			projectKey, _ := args["project_key"].(string)
-			return fmt.Sprintf("Failed to retrieve issues for project %s", projectKey), err.Error()
+			return fmt.Sprintf("Failed to retrieve issues for project %s", projectKey)
 		case "jira_get_epic_issues":
 			epicKey, _ := args["epic_key"].(string)
-			return fmt.Sprintf("Failed to retrieve issues linked to epic %s", epicKey), err.Error()
+			return fmt.Sprintf("Failed to retrieve issues linked to epic %s", epicKey)
 		case "jira_get_transitions":
 			issueKey, _ := args["issue_key"].(string)
-			return fmt.Sprintf("Failed to get transitions for %s", issueKey), err.Error()
+			return fmt.Sprintf("Failed to get transitions for %s", issueKey)
 		case "jira_get_worklog":
 			issueKey, _ := args["issue_key"].(string)
-			return fmt.Sprintf("Failed to get worklog for %s", issueKey), err.Error()
+			return fmt.Sprintf("Failed to get worklog for %s", issueKey)
 		case "jira_download_attachments":
 			issueKey, _ := args["issue_key"].(string)
-			return fmt.Sprintf("Failed to download attachments from %s", issueKey), err.Error()
+			return fmt.Sprintf("Failed to download attachments from %s", issueKey)
 		case "jira_get_agile_boards":
 			boardName, _ := args["board_name"].(string)
 			boardType, _ := args["board_type"].(string)
@@ -534,59 +534,59 @@ func (h *SlackHandler) formatToolCallMessage(toolName string, args map[string]in
 			if projectKey != "" {
 				searchCriteria += fmt.Sprintf("project: %s, ", projectKey)
 			}
-			return fmt.Sprintf("Failed to retrieve agile boards (%s)", strings.TrimRight(searchCriteria, ", ")), err.Error()
+			return fmt.Sprintf("Failed to retrieve agile boards (%s)", strings.TrimRight(searchCriteria, ", "))
 		case "jira_get_board_issues":
 			boardId, _ := args["board_id"].(string)
-			return fmt.Sprintf("Failed to retrieve issues from board %s", boardId), err.Error()
+			return fmt.Sprintf("Failed to retrieve issues from board %s", boardId)
 		case "jira_get_sprints_from_board":
 			boardId, _ := args["board_id"].(string)
-			return fmt.Sprintf("Failed to retrieve sprints from board %s", boardId), err.Error()
+			return fmt.Sprintf("Failed to retrieve sprints from board %s", boardId)
 		case "jira_create_sprint":
 			sprintName, _ := args["sprint_name"].(string)
-			return fmt.Sprintf("Failed to create sprint '%s'", sprintName), err.Error()
+			return fmt.Sprintf("Failed to create sprint '%s'", sprintName)
 		case "jira_get_sprint_issues":
 			sprintId, _ := args["sprint_id"].(string)
-			return fmt.Sprintf("Failed to retrieve issues from sprint %s", sprintId), err.Error()
+			return fmt.Sprintf("Failed to retrieve issues from sprint %s", sprintId)
 		case "jira_update_sprint":
 			sprintId, _ := args["sprint_id"].(string)
-			return fmt.Sprintf("Failed to update sprint %s", sprintId), err.Error()
+			return fmt.Sprintf("Failed to update sprint %s", sprintId)
 		case "jira_create_issue":
 			issueType, _ := args["issue_type"].(string)
 			projectKey, _ := args["project_key"].(string)
-			return fmt.Sprintf("Failed to create %s in project %s", issueType, projectKey), err.Error()
+			return fmt.Sprintf("Failed to create %s in project %s", issueType, projectKey)
 		case "jira_batch_create_issues":
-			return fmt.Sprintf("Failed to create issues"), err.Error()
+			return fmt.Sprintf("Failed to create issues")
 		case "jira_update_issue":
 			issueKey, _ := args["issue_key"].(string)
-			return fmt.Sprintf("Failed to update issue %s", issueKey), err.Error()
+			return fmt.Sprintf("Failed to update issue %s", issueKey)
 		case "jira_delete_issue":
 			issueKey, _ := args["issue_key"].(string)
-			return fmt.Sprintf("Failed to delete issue %s", issueKey), err.Error()
+			return fmt.Sprintf("Failed to delete issue %s", issueKey)
 		case "jira_add_comment":
 			issueKey, _ := args["issue_key"].(string)
-			return fmt.Sprintf("Failed to add comment to %s", issueKey), err.Error()
+			return fmt.Sprintf("Failed to add comment to %s", issueKey)
 		case "jira_add_worklog":
 			issueKey, _ := args["issue_key"].(string)
-			return fmt.Sprintf("Failed to add worklog to %s", issueKey), err.Error()
+			return fmt.Sprintf("Failed to add worklog to %s", issueKey)
 		case "jira_link_to_epic":
 			issueKey, _ := args["issue_key"].(string)
 			epicKey, _ := args["epic_key"].(string)
-			return fmt.Sprintf("Failed to link issue %s to epic %s", issueKey, epicKey), err.Error()
+			return fmt.Sprintf("Failed to link issue %s to epic %s", issueKey, epicKey)
 		case "jira_create_issue_link":
 			inwardIssue, _ := args["inward_issue_key"].(string)
 			outwardIssue, _ := args["outward_issue_key"].(string)
 			linkType, _ := args["link_type"].(string)
-			return fmt.Sprintf("Failed to create %s link between %s and %s", linkType, inwardIssue, outwardIssue), err.Error()
+			return fmt.Sprintf("Failed to create %s link between %s and %s", linkType, inwardIssue, outwardIssue)
 		case "jira_remove_issue_link":
 			linkId, _ := args["link_id"].(string)
-			return fmt.Sprintf("Failed to remove issue link %s", linkId), err.Error()
+			return fmt.Sprintf("Failed to remove issue link %s", linkId)
 		case "jira_get_link_types":
-			return fmt.Sprintf("Failed to get link types"), err.Error()
+			return fmt.Sprintf("Failed to get link types")
 		case "jira_transition_issue":
 			issueKey, _ := args["issue_key"].(string)
-			return fmt.Sprintf("Failed to transition issue %s", issueKey), err.Error()
+			return fmt.Sprintf("Failed to transition issue %s", issueKey)
 		default:
-			return "Operation failed", err.Error()
+			return "Operation failed"
 		}
 	}
 
@@ -594,47 +594,36 @@ func (h *SlackHandler) formatToolCallMessage(toolName string, args map[string]in
 	switch toolName {
 	case "jira_get_issue":
 		issueKey, _ := args["issue_key"].(string)
-		fields, _ := args["fields"].(string)
-		commentLimit, _ := args["comment_limit"].(int)
-		return fmt.Sprintf("Retrieved details for issue %s", issueKey),
-			fmt.Sprintf("Fields: %s\nComments: %d\n%s", fields, commentLimit, result)
+		return fmt.Sprintf("Retrieved details for issue %s", issueKey)
 	case "jira_search":
 		jql, _ := args["jql"].(string)
 		limit, _ := args["limit"].(float64)
-		return fmt.Sprintf("Search results for JQL '%s'", jql),
-			fmt.Sprintf("Limit: %d\n%s", int(limit), result)
+		return fmt.Sprintf("Search %d results for JQL '%s'", int(limit), jql)
 	case "jira_search_fields":
 		keyword, _ := args["keyword"].(string)
 		limit, _ := args["limit"].(float64)
 		if keyword != "" {
-			return fmt.Sprintf("Found %d fields matching '%s'", int(limit), keyword),
-				fmt.Sprintf("%s", result)
+			return fmt.Sprintf("Found %d fields matching '%s'", int(limit), keyword)
 		}
-		return fmt.Sprintf("Retrieved %d available fields", int(limit)),
-			fmt.Sprintf("%s", result)
+		return fmt.Sprintf("Retrieved %d available fields", int(limit))
 	case "jira_get_project_issues":
 		projectKey, _ := args["project_key"].(string)
 		limit, _ := args["limit"].(float64)
-		return fmt.Sprintf("Retrieved %d issues for project %s", int(limit), projectKey),
-			fmt.Sprintf("%s", result)
+		return fmt.Sprintf("Retrieved %d issues for project %s", int(limit), projectKey)
 	case "jira_get_epic_issues":
 		epicKey, _ := args["epic_key"].(string)
 		limit, _ := args["limit"].(float64)
-		return fmt.Sprintf("Retrieved %d issues linked to epic %s", int(limit), epicKey),
-			fmt.Sprintf("%s", result)
+		return fmt.Sprintf("Retrieved %d issues linked to epic %s", int(limit), epicKey)
 	case "jira_get_transitions":
 		issueKey, _ := args["issue_key"].(string)
-		return fmt.Sprintf("Available status transitions for %s", issueKey),
-			fmt.Sprintf("%s", result)
+		return fmt.Sprintf("Available status transitions for %s", issueKey)
 	case "jira_get_worklog":
 		issueKey, _ := args["issue_key"].(string)
-		return fmt.Sprintf("Worklog entries for %s", issueKey),
-			fmt.Sprintf("%s", result)
+		return fmt.Sprintf("Worklog entries for %s", issueKey)
 	case "jira_download_attachments":
 		issueKey, _ := args["issue_key"].(string)
 		targetDir, _ := args["target_dir"].(string)
-		return fmt.Sprintf("Downloaded attachments from %s to %s", issueKey, targetDir),
-			fmt.Sprintf("%s", result)
+		return fmt.Sprintf("Downloaded attachments from %s to %s", issueKey, targetDir)
 	case "jira_get_agile_boards":
 		boardName, _ := args["board_name"].(string)
 		boardType, _ := args["board_type"].(string)
@@ -650,34 +639,28 @@ func (h *SlackHandler) formatToolCallMessage(toolName string, args map[string]in
 		if projectKey != "" {
 			searchCriteria += fmt.Sprintf("project: %s, ", projectKey)
 		}
-		return fmt.Sprintf("Retrieved %d agile boards (%s)", int(limit), strings.TrimRight(searchCriteria, ", ")),
-			fmt.Sprintf("%s", result)
+		return fmt.Sprintf("Retrieved %d agile boards (%s)", int(limit), strings.TrimRight(searchCriteria, ", "))
 	case "jira_get_board_issues":
 		boardId, _ := args["board_id"].(string)
 		jql, _ := args["jql"].(string)
 		limit, _ := args["limit"].(float64)
-		return fmt.Sprintf("Retrieved %d issues from board %s (JQL: '%s')", int(limit), boardId, jql),
-			fmt.Sprintf("%s", result)
+		return fmt.Sprintf("Retrieved %d issues from board %s (JQL: '%s')", int(limit), boardId, jql)
 	case "jira_get_sprints_from_board":
 		boardId, _ := args["board_id"].(string)
 		state, _ := args["state"].(string)
 		limit, _ := args["limit"].(float64)
 		if state != "" {
-			return fmt.Sprintf("Retrieved %d %s sprints from board %s", int(limit), state, boardId),
-				fmt.Sprintf("%s", result)
+			return fmt.Sprintf("Retrieved %d %s sprints from board %s", int(limit), state, boardId)
 		}
-		return fmt.Sprintf("Retrieved %d sprints from board %s", int(limit), boardId),
-			fmt.Sprintf("%s", result)
+		return fmt.Sprintf("Retrieved %d sprints from board %s", int(limit), boardId)
 	case "jira_create_sprint":
 		sprintName, _ := args["sprint_name"].(string)
 		boardId, _ := args["board_id"].(string)
-		return fmt.Sprintf("Created new sprint '%s' for board %s", sprintName, boardId),
-			fmt.Sprintf("%s", result)
+		return fmt.Sprintf("Created new sprint '%s' for board %s", sprintName, boardId)
 	case "jira_get_sprint_issues":
 		sprintId, _ := args["sprint_id"].(string)
 		limit, _ := args["limit"].(float64)
-		return fmt.Sprintf("Retrieved %d issues from sprint %s", int(limit), sprintId),
-			fmt.Sprintf("%s", result)
+		return fmt.Sprintf("Retrieved %d issues from sprint %s", int(limit), sprintId)
 	case "jira_update_sprint":
 		sprintId, _ := args["sprint_id"].(string)
 		sprintName, _ := args["sprint_name"].(string)
@@ -689,37 +672,33 @@ func (h *SlackHandler) formatToolCallMessage(toolName string, args map[string]in
 		if state != "" {
 			updates += fmt.Sprintf("state: %s, ", state)
 		}
-		return fmt.Sprintf("Updated sprint %s (%s)", sprintId, strings.TrimRight(updates, ", ")),
-			fmt.Sprintf("%s", result)
+		return fmt.Sprintf("Updated sprint %s (%s)", sprintId, strings.TrimRight(updates, ", "))
 	case "jira_create_issue":
 		issueType, _ := args["issue_type"].(string)
 		projectKey, _ := args["project_key"].(string)
 		summary, _ := args["summary"].(string)
-		return fmt.Sprintf("Created new %s in project %s: '%s'", issueType, projectKey, summary),
-			fmt.Sprintf("%s", result)
+		return fmt.Sprintf("Created new %s in project %s: '%s'", issueType, projectKey, summary)
 	case "jira_batch_create_issues":
 		issues, _ := args["issues"].(string)
 		var issuesList []map[string]interface{}
 		json.Unmarshal([]byte(issues), &issuesList)
-		return fmt.Sprintf("Created %d issues", len(issuesList)),
-			fmt.Sprintf("%s", result)
+		return fmt.Sprintf("Created %d issues", len(issuesList))
 	case "jira_update_issue":
 		issueKey, _ := args["issue_key"].(string)
 		fields, _ := args["fields"].(string)
 		var fieldsMap map[string]interface{}
 		json.Unmarshal([]byte(fields), &fieldsMap)
 		if epicLink, ok := fieldsMap["customfield_10006"].(string); ok {
-			return fmt.Sprintf("Moved issue %s to epic %s", issueKey, epicLink), ""
+			return fmt.Sprintf("Moved issue %s to epic %s", issueKey, epicLink)
 		}
-		return fmt.Sprintf("Updated issue %s with fields", issueKey),
-			fmt.Sprintf("%s", result)
+		return fmt.Sprintf("Updated issue %s with fields", issueKey)
 	case "jira_delete_issue":
 		issueKey, _ := args["issue_key"].(string)
-		return fmt.Sprintf("Deleted issue %s", issueKey), ""
+		return fmt.Sprintf("Deleted issue %s", issueKey)
 	case "jira_add_comment":
 		issueKey, _ := args["issue_key"].(string)
 		comment, _ := args["comment"].(string)
-		return fmt.Sprintf("Added comment to %s: %s", issueKey, comment), ""
+		return fmt.Sprintf("Added comment to %s: %s", issueKey, comment)
 	case "jira_add_worklog":
 		issueKey, _ := args["issue_key"].(string)
 		timeSpent, _ := args["time_spent"].(string)
@@ -728,22 +707,21 @@ func (h *SlackHandler) formatToolCallMessage(toolName string, args map[string]in
 		if comment != "" {
 			msg += fmt.Sprintf(" with comment: %s", comment)
 		}
-		return msg, ""
+		return msg
 	case "jira_link_to_epic":
 		issueKey, _ := args["issue_key"].(string)
 		epicKey, _ := args["epic_key"].(string)
-		return fmt.Sprintf("Linked issue %s to epic %s", issueKey, epicKey), ""
+		return fmt.Sprintf("Linked issue %s to epic %s", issueKey, epicKey)
 	case "jira_create_issue_link":
 		inwardIssue, _ := args["inward_issue_key"].(string)
 		outwardIssue, _ := args["outward_issue_key"].(string)
 		linkType, _ := args["link_type"].(string)
-		return fmt.Sprintf("Created %s link between %s and %s", linkType, inwardIssue, outwardIssue), ""
+		return fmt.Sprintf("Created %s link between %s and %s", linkType, inwardIssue, outwardIssue)
 	case "jira_remove_issue_link":
 		linkId, _ := args["link_id"].(string)
-		return fmt.Sprintf("Removed issue link %s", linkId), ""
+		return fmt.Sprintf("Removed issue link %s", linkId)
 	case "jira_get_link_types":
-		return fmt.Sprintf("Available link types"),
-			fmt.Sprintf("%s", result)
+		return fmt.Sprintf("Available link types")
 	case "jira_transition_issue":
 		issueKey, _ := args["issue_key"].(string)
 		transitionId, _ := args["transition_id"].(string)
@@ -752,9 +730,9 @@ func (h *SlackHandler) formatToolCallMessage(toolName string, args map[string]in
 		if comment != "" {
 			msg += fmt.Sprintf(" with comment: %s", comment)
 		}
-		return msg, ""
+		return msg
 	default:
-		return "Operation completed", result
+		return "Operation completed"
 	}
 }
 
@@ -769,8 +747,8 @@ func (h *SlackHandler) createCollapsibleBlocks(title string, content string, isE
 	// Create the title block as a regular section
 	titleBlock := slack.NewSectionBlock(
 		&slack.TextBlockObject{
-			Type: slack.PlainTextType,
-			Text: fmt.Sprintf("%s %s", emoji, title),
+			Type: slack.MarkdownType,
+			Text: fmt.Sprintf("%s _%s_", emoji, title),
 		},
 		nil,
 		nil,
@@ -780,7 +758,7 @@ func (h *SlackHandler) createCollapsibleBlocks(title string, content string, isE
 	contentBlock := slack.NewSectionBlock(
 		&slack.TextBlockObject{
 			Type: slack.MarkdownType,
-			Text: fmt.Sprintf(">%s", strings.ReplaceAll(content, "\n", "\n>")),
+			Text: content,
 		},
 		nil,
 		nil,
