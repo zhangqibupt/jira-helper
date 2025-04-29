@@ -105,13 +105,9 @@ func (h *SlackHandler) sendEphemeralSlackMessage(channel string, message string,
 
 // sendMarkdownMessage sends a message to Slack with Markdown formatting enabled
 func (h *SlackHandler) sendMarkdownMessage(channel string, message string, threadTS string) error {
-	// Create a section block with markdown-enabled text
-	blockText := slack.NewTextBlockObject(slack.MarkdownType, message, false, false)
-	section := slack.NewSectionBlock(blockText, nil, nil)
-
 	_, _, err := h.api.PostMessage(
 		channel,
-		slack.MsgOptionBlocks(section),
+		slack.MsgOptionText(message, false),
 		slack.MsgOptionTS(threadTS))
 	if err != nil {
 		logger.GetLogger().Error(fmt.Sprintf("failed to post markdown message due to %s", err))
@@ -139,18 +135,17 @@ func (h *SlackHandler) summarizeIfTooLong(ctx context.Context, content string) (
 	summaryPrompt := []azopenai.ChatRequestMessageClassification{
 		&azopenai.ChatRequestSystemMessage{
 			Content: azopenai.NewChatRequestSystemMessageContent(`
-You are a summarization assistant. Your job is to condense lengthy tool results into concise, key information that is easy to read in Slack.
+You are a summarization assistant. Your job is to condense lengthy tool results into plain-text key information that is easy to read in Slack.
 
 Guidelines:
-- Focus on the most important and relevant details for the user's request.
-- Use clean, professional formatting.
-- For each item, only include key fields (e.g., key, summary, status, assignee), depend on which field is most relevant to user's request.
-- Remove unnecessary technical details, raw JSON, or verbose metadata.
-- If the content is too long, group or summarize similar items.
-- Always keep the summary under 3000 characters if possible.
-- Add a note if some content is omitted due to length.
+- Only output raw text. Do not use any Markdown syntax like **bold**, _italic_, > quote, or lists with bullets/symbols.
+- Keep formatting plain and simple. For example, use "Status: IN PROGRESS", not "**Status**: IN PROGRESS".
+- Remove all characters used for formatting or decoration.
+- Group or summarize if content is too long, and note if anything is omitted.
+- Always keep the summary under 2000 characters.
 
-Format your output for direct posting in Slack.
+Output the result as plain text, suitable for direct posting in Slack *without* markdown.
+
 			`),
 		},
 		&azopenai.ChatRequestUserMessage{
@@ -165,15 +160,40 @@ Format your output for direct posting in Slack.
 	return summarized, nil
 }
 
+// updateMessage updates an existing Slack message with new content
+func (h *SlackHandler) updateMessage(channel string, timestamp string, message string) error {
+	_, _, _, err := h.api.UpdateMessage(
+		channel,
+		timestamp,
+		slack.MsgOptionText(message, false),
+	)
+	if err != nil {
+		logger.GetLogger().Error(fmt.Sprintf("failed to update message due to %s", err))
+	}
+	return nil
+}
+
 // Update processQuery to handle conversation history
 func (h *SlackHandler) processQuery(ctx context.Context, query string, history []HistoryMessage, channelID string, threadTS string) (string, error) {
-	// Send initial progress message
-	if err := h.sendMarkdownMessage(channelID, "⏳ Analyzing your request to determine the best way to help you...", threadTS); err != nil {
+	// Initialize message array
+	var slackMessageLines []string
+	slackMessageLines = append(slackMessageLines, "⏳ Analyzing your request to determine the best way to help you...")
+
+	// Send initial progress message and save its timestamp
+	_, timestamp, err := h.api.PostMessage(
+		channelID,
+		slack.MsgOptionText(strings.Join(slackMessageLines, "\n\n"), false),
+		slack.MsgOptionTS(threadTS),
+	)
+	if err != nil {
 		logger.GetLogger().Error("failed to send progress message", zap.Error(err))
+		return "", err
 	}
 
 	tools, err := h.mcpClient.ListTools(ctx, mcp.ListToolsRequest{})
 	if err != nil {
+		slackMessageLines = append(slackMessageLines, fmt.Sprintf("❌ Failed to list tools: %v", err))
+		_ = h.updateMessage(channelID, timestamp, strings.Join(slackMessageLines, "\n\n"))
 		return "", fmt.Errorf("failed to list tools: %v", err)
 	}
 
@@ -204,7 +224,8 @@ func (h *SlackHandler) processQuery(ctx context.Context, query string, history [
 
 		response, err := h.aiClient.ChatWithTools(ctx, messages, openAITools)
 		if err != nil {
-			_ = h.sendMarkdownMessage(channelID, fmt.Sprintf("❌ Error occurred when processing your request: %s", defaultErrorMessage), threadTS)
+			slackMessageLines = append(slackMessageLines, fmt.Sprintf("❌ Error occurred when processing your request: %s", defaultErrorMessage))
+			_ = h.updateMessage(channelID, timestamp, strings.Join(slackMessageLines, "\n\n"))
 			return "", fmt.Errorf("failed to get chat completion: %v", err)
 		}
 		logger.GetLogger().Info("received response from AI", zap.Any("response", response))
@@ -215,10 +236,15 @@ func (h *SlackHandler) processQuery(ctx context.Context, query string, history [
 		}
 
 		if response.Content != "" {
-			_ = h.sendMarkdownMessage(channelID, response.Content, threadTS)
+			slackMessageLines = append(slackMessageLines, response.Content)
+			_ = h.updateMessage(channelID, timestamp, strings.Join(slackMessageLines, "\n\n"))
 		}
 
 		for _, toolCall := range response.ToolCalls {
+			// Update progress with current tool
+			slackMessageLines = append(slackMessageLines, fmt.Sprintf("🔄 _Calling Tool: %s_", toolCall.Name))
+			_ = h.updateMessage(channelID, timestamp, strings.Join(slackMessageLines, "\n\n"))
+
 			// Add the tool_calls message to messages first
 			messages = append(messages, &azopenai.ChatRequestAssistantMessage{
 				Content: azopenai.NewChatRequestAssistantMessageContent(""),
@@ -246,8 +272,8 @@ func (h *SlackHandler) processQuery(ctx context.Context, query string, history [
 					ToolCallID: &toolCall.ID,
 					Content:    azopenai.NewChatRequestToolMessageContent(err.Error()),
 				})
-				errorMsg := h.formatToolCallMessage(toolCall.Name, toolCall.Args, "", err)
-				_ = h.sendMarkdownMessage(channelID, errorMsg, threadTS)
+				slackMessageLines = append(slackMessageLines, h.formatToolCallMessage(toolCall.Name, toolCall.Args, "", err))
+				_ = h.updateMessage(channelID, timestamp, strings.Join(slackMessageLines, "\n\n"))
 				continue
 			}
 
@@ -260,21 +286,35 @@ func (h *SlackHandler) processQuery(ctx context.Context, query string, history [
 				Content:    azopenai.NewChatRequestToolMessageContent(toolResultStr),
 			})
 
-			// Send formatted message
-			formattedMsg := h.formatToolCallMessage(toolCall.Name, toolCall.Args, toolResultStr, nil)
-			_ = h.sendMarkdownMessage(channelID, formattedMsg, threadTS)
+			if len(toolResultStr) > 1000 {
+				slackMessageLines = []string{h.formatToolCallMessage(toolCall.Name, toolCall.Args, toolResultStr, nil)}
+				_, timestamp, err = h.api.PostMessage(
+					channelID,
+					slack.MsgOptionText(strings.Join(slackMessageLines, "\n\n"), false),
+					slack.MsgOptionTS(threadTS),
+				)
+				if err != nil {
+					logger.GetLogger().Error("failed to post message", zap.Error(err))
+				}
+			} else {
+				slackMessageLines = append(slackMessageLines, h.formatToolCallMessage(toolCall.Name, toolCall.Args, toolResultStr, nil))
+				_ = h.updateMessage(channelID, timestamp, strings.Join(slackMessageLines, "\n\n"))
+			}
+
 		}
 
 		currentRound++
 
 		if currentRound >= maxRounds {
 			warningMsg := "⚠️ Reached maximum number of steps. Providing partial response based on current progress..."
-			_ = h.sendMarkdownMessage(channelID, warningMsg, threadTS)
+			slackMessageLines = append(slackMessageLines, warningMsg)
+			_ = h.updateMessage(channelID, timestamp, strings.Join(slackMessageLines, "\n\n"))
 
 			partialResponse := fmt.Sprintf("Reached maximum conversation rounds. Last response: %s", response.Content)
 			return partialResponse, nil
 		}
 	}
+
 	return finalResponse, nil
 }
 
@@ -302,7 +342,8 @@ Your main tasks:
 - Manage epics and link issues to epics
 - Guide users through issue transitions and workflows
 - Retrieve and summarize issue details, comments, and worklogs
-- For ESC tickets, suggest similar tickets
+- If users ask for similar issues, you should only search for issues in the same project
+- Use Slack-supported markdown (e.g. *bold*, > quote), but avoid unsupported formatting (like headers #, tables, or HTML)
 
 When using Jira MCP APIs:
 - When using tool jira_get_issue, you should always use fields: *all as parameter
@@ -390,7 +431,8 @@ func (h *SlackHandler) getThreadHistory(channelID, threadTS string) ([]HistoryMe
 	params := &slack.GetConversationRepliesParameters{
 		ChannelID: channelID,
 		Timestamp: threadTS,
-		Limit:     20, // messages per page
+		Limit:     20,   // messages per page
+		Inclusive: true, // Include the message with the specified timestamp
 	}
 
 	for {
@@ -541,42 +583,48 @@ func (h *SlackHandler) formatToolCallMessage(toolName string, args map[string]in
 		}
 	}
 
+	resultLines := strings.Split(result, "\n")
+	for i, line := range resultLines {
+		resultLines[i] = "\n> " + line
+	}
+	result = strings.Join(resultLines, "")
+
 	// Success case remains the same
 	switch toolName {
 	case "jira_get_issue":
 		issueKey, _ := args["issue_key"].(string)
 		fields, _ := args["fields"].(string)
 		commentLimit, _ := args["comment_limit"].(int)
-		return fmt.Sprintf("✅ Retrieved details for issue %s (fields: %s, comments: %d) ```%s```", issueKey, fields, commentLimit, result)
+		return fmt.Sprintf("✅ Retrieved details for issue %s (fields: %s, comments: %d) \n %s", issueKey, fields, commentLimit, result)
 	case "jira_search":
 		jql, _ := args["jql"].(string)
 		limit, _ := args["limit"].(float64)
-		return fmt.Sprintf("✅ Search results for JQL '%s' (limit: %d): ```%s```", jql, int(limit), result)
+		return fmt.Sprintf("✅ Search results for JQL '%s' (limit: %d): \n %s", jql, int(limit), result)
 	case "jira_search_fields":
 		keyword, _ := args["keyword"].(string)
 		limit, _ := args["limit"].(float64)
 		if keyword != "" {
-			return fmt.Sprintf("✅ Found %d fields matching '%s': ```%s```", int(limit), keyword, result)
+			return fmt.Sprintf("✅ Found %d fields matching '%s': \n %s", int(limit), keyword, result)
 		}
-		return fmt.Sprintf("✅ Retrieved %d available fields: ```%s```", int(limit), result)
+		return fmt.Sprintf("✅ Retrieved %d available fields: \n %s", int(limit), result)
 	case "jira_get_project_issues":
 		projectKey, _ := args["project_key"].(string)
 		limit, _ := args["limit"].(float64)
-		return fmt.Sprintf("✅ Retrieved %d issues for project %s: ```%s```", int(limit), projectKey, result)
+		return fmt.Sprintf("✅ Retrieved %d issues for project %s: \n %s", int(limit), projectKey, result)
 	case "jira_get_epic_issues":
 		epicKey, _ := args["epic_key"].(string)
 		limit, _ := args["limit"].(float64)
-		return fmt.Sprintf("✅ Retrieved %d issues linked to epic %s: ```%s```", int(limit), epicKey, result)
+		return fmt.Sprintf("✅ Retrieved %d issues linked to epic %s: \n %s", int(limit), epicKey, result)
 	case "jira_get_transitions":
 		issueKey, _ := args["issue_key"].(string)
-		return fmt.Sprintf("✅ Available status transitions for %s: ```%s```", issueKey, result)
+		return fmt.Sprintf("✅ Available status transitions for %s: \n %s", issueKey, result)
 	case "jira_get_worklog":
 		issueKey, _ := args["issue_key"].(string)
-		return fmt.Sprintf("✅ Worklog entries for %s: ```%s```", issueKey, result)
+		return fmt.Sprintf("✅ Worklog entries for %s: \n %s", issueKey, result)
 	case "jira_download_attachments":
 		issueKey, _ := args["issue_key"].(string)
 		targetDir, _ := args["target_dir"].(string)
-		return fmt.Sprintf("✅ Downloaded attachments from %s to %s: ```%s```", issueKey, targetDir, result)
+		return fmt.Sprintf("✅ Downloaded attachments from %s to %s: \n %s", issueKey, targetDir, result)
 	case "jira_get_agile_boards":
 		boardName, _ := args["board_name"].(string)
 		boardType, _ := args["board_type"].(string)
@@ -592,28 +640,28 @@ func (h *SlackHandler) formatToolCallMessage(toolName string, args map[string]in
 		if projectKey != "" {
 			searchCriteria += fmt.Sprintf("project: %s, ", projectKey)
 		}
-		return fmt.Sprintf("✅ Retrieved %d agile boards (%s): ```%s```", int(limit), strings.TrimRight(searchCriteria, ", "), result)
+		return fmt.Sprintf("✅ Retrieved %d agile boards (%s): \n %s", int(limit), strings.TrimRight(searchCriteria, ", "), result)
 	case "jira_get_board_issues":
 		boardId, _ := args["board_id"].(string)
 		jql, _ := args["jql"].(string)
 		limit, _ := args["limit"].(float64)
-		return fmt.Sprintf("✅ Retrieved %d issues from board %s (JQL: '%s'): ```%s```", int(limit), boardId, jql, result)
+		return fmt.Sprintf("✅ Retrieved %d issues from board %s (JQL: '%s'): \n %s", int(limit), boardId, jql, result)
 	case "jira_get_sprints_from_board":
 		boardId, _ := args["board_id"].(string)
 		state, _ := args["state"].(string)
 		limit, _ := args["limit"].(float64)
 		if state != "" {
-			return fmt.Sprintf("✅ Retrieved %d %s sprints from board %s: ```%s```", int(limit), state, boardId, result)
+			return fmt.Sprintf("✅ Retrieved %d %s sprints from board %s: \n %s", int(limit), state, boardId, result)
 		}
-		return fmt.Sprintf("✅ Retrieved %d sprints from board %s: ```%s```", int(limit), boardId, result)
+		return fmt.Sprintf("✅ Retrieved %d sprints from board %s: \n %s", int(limit), boardId, result)
 	case "jira_create_sprint":
 		sprintName, _ := args["sprint_name"].(string)
 		boardId, _ := args["board_id"].(string)
-		return fmt.Sprintf("✅ Created new sprint '%s' for board %s: ```%s```", sprintName, boardId, result)
+		return fmt.Sprintf("✅ Created new sprint '%s' for board %s: \n %s", sprintName, boardId, result)
 	case "jira_get_sprint_issues":
 		sprintId, _ := args["sprint_id"].(string)
 		limit, _ := args["limit"].(float64)
-		return fmt.Sprintf("✅ Retrieved %d issues from sprint %s: ```%s```", int(limit), sprintId, result)
+		return fmt.Sprintf("✅ Retrieved %d issues from sprint %s: \n %s", int(limit), sprintId, result)
 	case "jira_update_sprint":
 		sprintId, _ := args["sprint_id"].(string)
 		sprintName, _ := args["sprint_name"].(string)
@@ -625,17 +673,17 @@ func (h *SlackHandler) formatToolCallMessage(toolName string, args map[string]in
 		if state != "" {
 			updates += fmt.Sprintf("state: %s, ", state)
 		}
-		return fmt.Sprintf("✅ Updated sprint %s (%s): ```%s```", sprintId, strings.TrimRight(updates, ", "), result)
+		return fmt.Sprintf("✅ Updated sprint %s (%s): \n %s", sprintId, strings.TrimRight(updates, ", "), result)
 	case "jira_create_issue":
 		issueType, _ := args["issue_type"].(string)
 		projectKey, _ := args["project_key"].(string)
 		summary, _ := args["summary"].(string)
-		return fmt.Sprintf("✅ Created new %s in project %s: '%s' - ```%s```", issueType, projectKey, summary, result)
+		return fmt.Sprintf("✅ Created new %s in project %s: '%s' - \n %s", issueType, projectKey, summary, result)
 	case "jira_batch_create_issues":
 		issues, _ := args["issues"].(string)
 		var issuesList []map[string]interface{}
 		json.Unmarshal([]byte(issues), &issuesList)
-		return fmt.Sprintf("✅ Created %d issues: ```%s```", len(issuesList), result)
+		return fmt.Sprintf("✅ Created %d issues: \n %s", len(issuesList), result)
 	case "jira_update_issue":
 		issueKey, _ := args["issue_key"].(string)
 		fields, _ := args["fields"].(string)
@@ -644,7 +692,7 @@ func (h *SlackHandler) formatToolCallMessage(toolName string, args map[string]in
 		if epicLink, ok := fieldsMap["customfield_10006"].(string); ok {
 			return fmt.Sprintf("✅ Moved issue %s to epic %s", issueKey, epicLink)
 		}
-		return fmt.Sprintf("✅ Updated issue %s with fields: ```%s```", issueKey, result)
+		return fmt.Sprintf("✅ Updated issue %s with fields: \n %s", issueKey, result)
 	case "jira_delete_issue":
 		issueKey, _ := args["issue_key"].(string)
 		return fmt.Sprintf("✅ Deleted issue %s", issueKey)

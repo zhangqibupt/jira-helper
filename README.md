@@ -56,8 +56,8 @@ Your personal token will be securely stored and used for all write operations in
 - [x] Implement basic workflow Jira API using uvx
 - [ ] Build Docker image to deploy in AWS 
 - [ ] Implement user token management, /setup-token
-- [ ] Fix get history thread error
-- [ ] Support DM message
+- [x] Fix get history thread error
+- [x] Support DM message
 - [x] Add contact info in APP description
 - [ ] Support multipe repied to show thinking logic. maybe just edit the previous message.
 - [ ] Use READ_ONLY_MODE to enable/disable write operations

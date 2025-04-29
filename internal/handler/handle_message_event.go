@@ -13,7 +13,7 @@ import (
 // handleMessageEvent handles direct messages and channel messages that mention the bot
 func (h *SlackHandler) handleMessageEvent(ev *slackevents.MessageEvent) error {
 	// Ignore messages from bots to prevent loops
-	if ev.BotID != "" || ev.SubType == "bot_message" {
+	if ev.BotID != "" || ev.SubType == "bot_message" || ev.SubType == "message_changed" {
 		return nil
 	}
 
