@@ -79,135 +79,6 @@ func (h *SlackHandler) HandleRequest(c *gin.Context) {
 	c.JSON(200, gin.H{"status": "ok"})
 }
 
-const defaultErrorMessage = "Something went wrong while processing your request. Please try again later or contact @qzhang for help. Error: %s"
-
-func (h *SlackHandler) sendSlackMessage(channel string, message string, threadTS string) error {
-	_, _, err := h.api.PostMessage(
-		channel,
-		slack.MsgOptionText(message, false),
-		slack.MsgOptionTS(threadTS))
-	if err != nil {
-		logger.GetLogger().Error(fmt.Sprintf("failed to post message due to %s", err))
-	}
-	return err
-}
-
-func (h *SlackHandler) sendEphemeralSlackMessage(channel string, message string, threadTS string) error {
-	_, _, err := h.api.PostMessage(
-		channel,
-		slack.MsgOptionText(message, false),
-		slack.MsgOptionTS(threadTS))
-	if err != nil {
-		logger.GetLogger().Error(fmt.Sprintf("failed to post message due to %s", err))
-	}
-	return err
-}
-
-// sendMarkdownMessage sends a message to Slack with Markdown formatting enabled
-func (h *SlackHandler) sendMarkdownMessage(channel string, message string, threadTS string) error {
-	_, _, err := h.api.PostMessage(
-		channel,
-		slack.MsgOptionText(message, false),
-		slack.MsgOptionTS(threadTS))
-	if err != nil {
-		logger.GetLogger().Error(fmt.Sprintf("failed to post markdown message due to %s", err))
-	}
-	return err
-}
-
-// prettyPrintJSON formats any value as a pretty-printed JSON string
-func prettyPrintJSON(v interface{}) string {
-	prettyJSON, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
-		logger.GetLogger().Error("failed to marshal to JSON", zap.Error(err))
-		return fmt.Sprintf("%v", v) // fallback to string representation if marshaling fails
-	}
-	return string(prettyJSON)
-}
-func printJSON(v interface{}) string {
-	prettyJSON, err := json.Marshal(v)
-	if err != nil {
-		logger.GetLogger().Error("failed to marshal to JSON", zap.Error(err))
-		return fmt.Sprintf("%v", v) // fallback to string representation if marshaling fails
-	}
-	return string(prettyJSON)
-}
-
-// summarizeIfTooLong checks if the content is too long and summarizes it using the AI model if necessary.
-func (h *SlackHandler) summarizeIfTooLong(ctx context.Context, content string) (string, error) {
-	maxLen := 2000 // character threshold for summarization
-	if len(content) <= maxLen {
-		return content, nil
-	}
-
-	summaryPrompt := []azopenai.ChatRequestMessageClassification{
-		&azopenai.ChatRequestSystemMessage{
-			Content: azopenai.NewChatRequestSystemMessageContent(`
-You are a summarization assistant. Your job is to condense lengthy tool results into plain-text key information that is easy to read in Slack.
-
-Guidelines:
-- Only output raw text. Do not use any Markdown syntax like **bold**, _italic_, > quote, or lists with bullets/symbols.
-- Keep formatting plain and simple. For example, use "Status: IN PROGRESS", not "**Status**: IN PROGRESS".
-- Remove all characters used for formatting or decoration.
-- Group or summarize if content is too long, and note if anything is omitted.
-- Always keep the summary under 2000 characters.
-
-Output the result as plain text, suitable for direct posting in Slack *without* markdown.
-
-			`),
-		},
-		&azopenai.ChatRequestUserMessage{
-			Content: azopenai.NewChatRequestUserMessageContent(content),
-		},
-	}
-	summarized, err := h.aiClient.Chat(ctx, summaryPrompt)
-	if err != nil || summarized == "" {
-		// If summarization fails, return the original content
-		return content, err
-	}
-	return summarized, nil
-}
-
-// updateMessage updates an existing Slack message with new content and returns the message timestamp
-func (h *SlackHandler) updateMessage(channel string, timestamp string, existingLines []string, newLine string) (string, error) {
-	// Add new line to existing lines
-	existingLines = append(existingLines, newLine)
-	message := strings.Join(existingLines, "\n\n")
-
-	// Slack message length limit (approximately 40,000 characters)
-	const maxMessageLength = 40000
-
-	if len(message) > maxMessageLength {
-		// If combined message is too long, send only the new message in the thread
-		logger.GetLogger().Info("Combined message too long, sending new content as separate message",
-			zap.Int("combinedLength", len(message)),
-			zap.Int("maxLength", maxMessageLength))
-
-		// Send new line as a new message in the thread
-		_, newTimestamp, err := h.api.PostMessage(
-			channel,
-			slack.MsgOptionText(newLine, false),
-			slack.MsgOptionTS(timestamp))
-		if err != nil {
-			logger.GetLogger().Error("failed to send new message", zap.Error(err))
-			return timestamp, err
-		}
-
-		return newTimestamp, nil
-	}
-
-	// If message is not too long, update the existing message with all content
-	_, _, _, err := h.api.UpdateMessage(
-		channel,
-		timestamp,
-		slack.MsgOptionText(message, false),
-	)
-	if err != nil {
-		logger.GetLogger().Error("failed to update message", zap.Error(err))
-	}
-	return timestamp, nil
-}
-
 // Update processQuery to handle conversation history
 func (h *SlackHandler) processQuery(ctx context.Context, query string, history []HistoryMessage, channelID string, threadTS string) (string, error) {
 	// Initialize message array
@@ -359,26 +230,6 @@ func (h *SlackHandler) processQuery(ctx context.Context, query string, history [
 	return finalResponse, nil
 }
 
-func formatCallToolResult(result string) string {
-	lines := strings.Split(result, "\n")
-	for i, line := range lines {
-		lines[i] = fmt.Sprintf(">_%s_", line)
-	}
-	return strings.Join(lines, "\n")
-}
-
-func printToolResult(result *mcp.CallToolResult) string {
-	for _, content := range result.Content {
-		if textContent, ok := content.(mcp.TextContent); ok {
-			return textContent.Text
-		} else {
-			jsonBytes, _ := json.MarshalIndent(content, "", "  ")
-			return string(jsonBytes)
-		}
-	}
-	return ""
-}
-
 // createInitialMessages creates the initial message list
 func (h *SlackHandler) createInitialMessages(query string, history []HistoryMessage) []azopenai.ChatRequestMessageClassification {
 	// Create system message
@@ -465,15 +316,6 @@ Start by understanding the user's needs, then use the appropriate tools to help 
 	return messages
 }
 
-// mustMarshal helper function for JSON serialization
-func mustMarshal(v interface{}) []byte {
-	data, err := json.Marshal(v)
-	if err != nil {
-		panic(err)
-	}
-	return data
-}
-
 // getThreadHistory retrieves the conversation history from a thread
 func (h *SlackHandler) getThreadHistory(channelID, threadTS string) ([]HistoryMessage, error) {
 	var allMessages []slack.Message
@@ -512,22 +354,6 @@ func (h *SlackHandler) getThreadHistory(channelID, threadTS string) ([]HistoryMe
 	}
 
 	return historyMessages, nil
-}
-
-func ensureValidSchema(schema json.RawMessage) json.RawMessage {
-	var m map[string]interface{}
-	if err := json.Unmarshal(schema, &m); err != nil {
-		// fallback: return {"type":"object","properties":{}}
-		return json.RawMessage(`{"type":"object","properties":{}}`)
-	}
-	if m["type"] != "object" {
-		m["type"] = "object"
-	}
-	if _, ok := m["properties"]; !ok {
-		m["properties"] = map[string]interface{}{}
-	}
-	b, _ := json.Marshal(m)
-	return b
 }
 
 // formatToolCallMessage formats tool call messages in a more natural language way
@@ -789,3 +615,169 @@ func (h *SlackHandler) createCollapsibleBlocks(title string, content string, isE
 	// Format the message with title and content
 	return fmt.Sprintf("%s _%s_\n%s", emoji, title, content)
 }
+
+func (h *SlackHandler) sendSlackMessage(channel string, message string, threadTS string) error {
+	_, _, err := h.api.PostMessage(
+		channel,
+		slack.MsgOptionText(message, false),
+		slack.MsgOptionTS(threadTS))
+	if err != nil {
+		logger.GetLogger().Error(fmt.Sprintf("failed to post message due to %s", err))
+	}
+	return err
+}
+
+func (h *SlackHandler) sendEphemeralSlackMessage(channel string, message string, threadTS string) error {
+	_, _, err := h.api.PostMessage(
+		channel,
+		slack.MsgOptionText(message, false),
+		slack.MsgOptionTS(threadTS))
+	if err != nil {
+		logger.GetLogger().Error(fmt.Sprintf("failed to post message due to %s", err))
+	}
+	return err
+}
+
+// sendMarkdownMessage sends a message to Slack with Markdown formatting enabled
+func (h *SlackHandler) sendMarkdownMessage(channel string, message string, threadTS string) error {
+	_, _, err := h.api.PostMessage(
+		channel,
+		slack.MsgOptionText(message, false),
+		slack.MsgOptionTS(threadTS))
+	if err != nil {
+		logger.GetLogger().Error(fmt.Sprintf("failed to post markdown message due to %s", err))
+	}
+	return err
+}
+
+// summarizeIfTooLong checks if the content is too long and summarizes it using the AI model if necessary.
+func (h *SlackHandler) summarizeIfTooLong(ctx context.Context, content string) (string, error) {
+	maxLen := 2000 // character threshold for summarization
+	if len(content) <= maxLen {
+		return content, nil
+	}
+
+	summaryPrompt := []azopenai.ChatRequestMessageClassification{
+		&azopenai.ChatRequestSystemMessage{
+			Content: azopenai.NewChatRequestSystemMessageContent(`
+You are a summarization assistant. Your job is to condense lengthy tool results into plain-text key information that is easy to read in Slack.
+
+Guidelines:
+- Only output raw text. Do not use any Markdown syntax like **bold**, _italic_, > quote, or lists with bullets/symbols.
+- Keep formatting plain and simple. For example, use "Status: IN PROGRESS", not "**Status**: IN PROGRESS".
+- Remove all characters used for formatting or decoration.
+- Group or summarize if content is too long, and note if anything is omitted.
+- Always keep the summary under 2000 characters.
+
+Output the result as plain text, suitable for direct posting in Slack *without* markdown.
+
+			`),
+		},
+		&azopenai.ChatRequestUserMessage{
+			Content: azopenai.NewChatRequestUserMessageContent(content),
+		},
+	}
+	summarized, err := h.aiClient.Chat(ctx, summaryPrompt)
+	if err != nil || summarized == "" {
+		// If summarization fails, return the original content
+		return content, err
+	}
+	return summarized, nil
+}
+
+// updateMessage updates an existing Slack message with new content and returns the message timestamp
+func (h *SlackHandler) updateMessage(channel string, timestamp string, existingLines []string, newLine string) (string, error) {
+	// Add new line to existing lines
+	existingLines = append(existingLines, newLine)
+	message := strings.Join(existingLines, "\n\n")
+
+	// Slack message length limit (approximately 40,000 characters)
+	const maxMessageLength = 40000
+
+	if len(message) > maxMessageLength {
+		// If combined message is too long, send only the new message in the thread
+		logger.GetLogger().Info("Combined message too long, sending new content as separate message",
+			zap.Int("combinedLength", len(message)),
+			zap.Int("maxLength", maxMessageLength))
+
+		// Send new line as a new message in the thread
+		_, newTimestamp, err := h.api.PostMessage(
+			channel,
+			slack.MsgOptionText(newLine, false),
+			slack.MsgOptionTS(timestamp))
+		if err != nil {
+			logger.GetLogger().Error("failed to send new message", zap.Error(err))
+			return timestamp, err
+		}
+
+		return newTimestamp, nil
+	}
+
+	// If message is not too long, update the existing message with all content
+	_, _, _, err := h.api.UpdateMessage(
+		channel,
+		timestamp,
+		slack.MsgOptionText(message, false),
+	)
+	if err != nil {
+		logger.GetLogger().Error("failed to update message", zap.Error(err))
+	}
+	return timestamp, nil
+}
+
+func ensureValidSchema(schema json.RawMessage) json.RawMessage {
+	var m map[string]interface{}
+	if err := json.Unmarshal(schema, &m); err != nil {
+		// fallback: return {"type":"object","properties":{}}
+		return json.RawMessage(`{"type":"object","properties":{}}`)
+	}
+	if m["type"] != "object" {
+		m["type"] = "object"
+	}
+	if _, ok := m["properties"]; !ok {
+		m["properties"] = map[string]interface{}{}
+	}
+	b, _ := json.Marshal(m)
+	return b
+}
+
+// prettyPrintJSON formats any value as a pretty-printed JSON string
+func prettyPrintJSON(v interface{}) string {
+	prettyJSON, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		logger.GetLogger().Error("failed to marshal to JSON", zap.Error(err))
+		return fmt.Sprintf("%v", v) // fallback to string representation if marshaling fails
+	}
+	return string(prettyJSON)
+}
+
+func printJSON(v interface{}) string {
+	prettyJSON, err := json.Marshal(v)
+	if err != nil {
+		logger.GetLogger().Error("failed to marshal to JSON", zap.Error(err))
+		return fmt.Sprintf("%v", v) // fallback to string representation if marshaling fails
+	}
+	return string(prettyJSON)
+}
+
+func formatCallToolResult(result string) string {
+	lines := strings.Split(result, "\n")
+	for i, line := range lines {
+		lines[i] = fmt.Sprintf(">_%s_", line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func printToolResult(result *mcp.CallToolResult) string {
+	for _, content := range result.Content {
+		if textContent, ok := content.(mcp.TextContent); ok {
+			return textContent.Text
+		} else {
+			jsonBytes, _ := json.MarshalIndent(content, "", "  ")
+			return string(jsonBytes)
+		}
+	}
+	return ""
+}
+
+const defaultErrorMessage = "Something went wrong while processing your request. Please try again later or contact @qzhang for help. Error: %s"
