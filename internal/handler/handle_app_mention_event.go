@@ -31,7 +31,7 @@ func (h *SlackHandler) handleAppMentionEvent(ev *slackevents.AppMentionEvent) er
 		// If the message is in a thread, get the thread history
 		history, err = h.getThreadHistory(ev.Channel, threadTS)
 		if err != nil {
-			_ = h.sendMarkdownMessage(ev.Channel, fmt.Sprintf(defaultErrorMessage, err.Error()), threadTS)
+			_, _ = h.sendMarkdownMessage(ev.Channel, fmt.Sprintf(defaultErrorMessage, err.Error()), threadTS)
 			logger.GetLogger().Error(fmt.Sprintf("failed to get thread history: %v", err))
 			return fmt.Errorf("failed to get thread history: %v", err)
 		}
@@ -44,7 +44,7 @@ func (h *SlackHandler) handleAppMentionEvent(ev *slackevents.AppMentionEvent) er
 	}
 
 	// Post the response in the thread
-	_ = h.sendMarkdownMessage(ev.Channel, response, threadTS)
+	_, _ = h.sendMarkdownMessage(ev.Channel, response, threadTS)
 
 	return nil
 }

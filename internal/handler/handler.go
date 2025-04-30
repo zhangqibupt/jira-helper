@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"jira_whisperer/internal/logger"
+	"strings"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 
@@ -79,32 +80,44 @@ func (h *SlackHandler) HandleRequest(c *gin.Context) {
 	c.JSON(200, gin.H{"status": "ok"})
 }
 
-// Update processQuery to handle conversation history
+// processQuery handles the main conversation flow with the AI model
 func (h *SlackHandler) processQuery(ctx context.Context, query string, history []HistoryMessage, channelID string, threadTS string) (string, error) {
-	// Initialize message array
-	var slackMessageLines []string
-	slackMessageLines = append(slackMessageLines, "⏳ Analyzing your request to determine the best way to help you...")
+	// Initialize and send progress message
+	initialMessage := "⏳ Analyzing your request to determine the best way to help you..."
+	timestamp, _ := h.sendMarkdownMessage(channelID, initialMessage, threadTS)
+	slackMessageLines := []string{initialMessage}
 
-	// Send initial progress message and save its timestamp
-	_, timestamp, err := h.api.PostMessage(
-		channelID,
-		slack.MsgOptionText(slackMessageLines[0], false),
-		slack.MsgOptionTS(threadTS),
-	)
+	// Prepare tools and messages
+	openAITools, messages, err := h.prepareConversation(ctx, query, history)
 	if err != nil {
-		logger.GetLogger().Error("failed to send progress message", zap.Error(err))
 		return "", err
 	}
 
+	// Run the conversation loop
+	return h.runConversationLoop(ctx, channelID, threadTS, timestamp, messages, openAITools, slackMessageLines)
+}
+
+// prepareConversation sets up the tools and initial messages for the conversation
+func (h *SlackHandler) prepareConversation(ctx context.Context, query string, history []HistoryMessage) ([]openai.Tool, []azopenai.ChatRequestMessageClassification, error) {
+	// Get available tools
 	tools, err := h.mcpClient.ListTools(ctx, mcp.ListToolsRequest{})
 	if err != nil {
-		h.sendMarkdownMessage(channelID, fmt.Sprintf(defaultErrorMessage, err.Error()), threadTS)
-		return "", fmt.Errorf("failed to list tools: %v", err)
+		return nil, nil, fmt.Errorf("failed to list tools: %v", err)
 	}
 
+	// Convert tools to OpenAI format
+	openAITools := h.convertToolsToOpenAIFormat(tools.Tools)
+
+	// Create initial messages
+	messages := h.createInitialMessages(query, history)
+
+	return openAITools, messages, nil
+}
+
+// convertToolsToOpenAIFormat converts MCP tools to OpenAI tool format
+func (h *SlackHandler) convertToolsToOpenAIFormat(tools []mcp.Tool) []openai.Tool {
 	var openAITools []openai.Tool
-	logger.GetLogger().Info("available tools", zap.Any("tools", tools.Tools))
-	for _, tool := range tools.Tools {
+	for _, tool := range tools {
 		schemaBytes, _ := json.Marshal(tool.InputSchema)
 		openAITools = append(openAITools, openai.Tool{
 			Name:        tool.Name,
@@ -112,122 +125,153 @@ func (h *SlackHandler) processQuery(ctx context.Context, query string, history [
 			Parameters:  string(ensureValidSchema(json.RawMessage(schemaBytes))),
 		})
 	}
+	return openAITools
+}
 
-	messages := h.createInitialMessages(query, history)
-
+// runConversationLoop handles the main conversation loop with the AI model
+func (h *SlackHandler) runConversationLoop(ctx context.Context, channelID, threadTS, timestamp string, messages []azopenai.ChatRequestMessageClassification, openAITools []openai.Tool, slackMessageLines []string) (string, error) {
 	maxRounds := 20
 	currentRound := 0
 
-	var finalResponse string
 	for currentRound < maxRounds {
-		maxMessages := 21 // 1 system prompt + 20 recent messages
-		if len(messages) > maxMessages {
-			systemPrompt := messages[0:1]
-			rest := messages[len(messages)-20:]
-			messages = append(systemPrompt, rest...)
-		}
+		// Trim messages if needed
+		messages = h.trimMessages(messages)
 
+		// Get AI response
 		response, err := h.aiClient.ChatWithTools(ctx, messages, openAITools)
 		if err != nil {
-			_ = h.sendMarkdownMessage(channelID, fmt.Sprintf(defaultErrorMessage, err.Error()), threadTS)
+			_, _ = h.sendMarkdownMessage(channelID, fmt.Sprintf(defaultErrorMessage, err.Error()), threadTS)
 			return "", fmt.Errorf("failed to get chat completion: %v", err)
 		}
-		logger.GetLogger().Info("received response from AI", zap.Any("response", response))
 
+		// Handle complete response
 		if response.IsComplete {
-			finalResponse = response.Content
-			break
+			return response.Content, nil
 		}
 
+		// Update progress with AI response
 		if response.Content != "" {
-			var updateErr error
-			timestamp, updateErr = h.updateMessage(channelID, timestamp, slackMessageLines, response.Content)
-			if updateErr != nil {
-				logger.GetLogger().Error("failed to update message", zap.Error(updateErr))
-			}
 			slackMessageLines = append(slackMessageLines, response.Content)
+			_ = h.updateMessage(channelID, timestamp, strings.Join(slackMessageLines, "\n\n"))
 		}
 
+		// Handle tool calls
 		for _, toolCall := range response.ToolCalls {
-			// Add the tool_calls message to messages first
-			messages = append(messages, &azopenai.ChatRequestAssistantMessage{
-				Content: azopenai.NewChatRequestAssistantMessageContent(""),
-				ToolCalls: []azopenai.ChatCompletionsToolCallClassification{
-					&azopenai.ChatCompletionsFunctionToolCall{
-						ID:   to.Ptr(toolCall.ID),
-						Type: to.Ptr("function"),
-						Function: &azopenai.FunctionCall{
-							Name:      to.Ptr(toolCall.Name),
-							Arguments: to.Ptr(prettyPrintJSON(toolCall.Args)),
-						},
-					},
-				},
-			})
+			// Add tool call to messages
+			messages = h.addToolCallToMessages(messages, toolCall)
 
 			// Update progress with current tool
-			message := fmt.Sprintf("🔄 _Calling Tool *%s*_", toolCall.Name)
+			slackMessage := fmt.Sprintf("🔄 _Calling Tool *%s*_", toolCall.Name)
 			if len(toolCall.Args) > 0 {
-				message += fmt.Sprintf("\n>_%s_", printJSON(toolCall.Args))
+				slackMessage += fmt.Sprintf("\n>_%s_", printJSON(toolCall.Args))
 			}
-			var updateErr error
-			timestamp, updateErr = h.updateMessage(channelID, timestamp, slackMessageLines, message)
-			if updateErr != nil {
-				logger.GetLogger().Error("failed to update message", zap.Error(updateErr))
-			}
-			slackMessageLines = append(slackMessageLines, message)
 
-			request := mcp.CallToolRequest{}
-			request.Method = toolCall.Name
-			request.Params.Name = toolCall.Name
-			request.Params.Arguments = toolCall.Args
+			slackMessageLines = append(slackMessageLines, slackMessage)
+			_ = h.updateMessage(channelID, timestamp, strings.Join(slackMessageLines, "\n\n"))
 
-			result, err := h.mcpClient.CallTool(ctx, request)
+			// Execute tool and handle response
+			toolResult, err := h.executeTool(ctx, toolCall)
 			if err != nil {
-				// Add the error as a user message instead of a tool message
 				messages = append(messages, &azopenai.ChatRequestToolMessage{
 					ToolCallID: &toolCall.ID,
 					Content:    azopenai.NewChatRequestToolMessageContent(err.Error()),
 				})
-				title := h.formatToolCallMessage(toolCall.Name, toolCall.Args, err)
-				message := h.createCollapsibleBlocks(title, formatCallToolResult(err.Error()), true)
-				timestamp, updateErr = h.updateMessage(channelID, timestamp, slackMessageLines, message)
-				if updateErr != nil {
-					logger.GetLogger().Error("failed to update message", zap.Error(updateErr))
-				}
-				slackMessageLines = append(slackMessageLines, message)
 				continue
 			}
 
-			toolResultStr := printToolResult(result)
-			toolResultStr, _ = h.summarizeIfTooLong(ctx, toolResultStr)
-
-			// Add the tool response as a tool message
-			messages = append(messages, &azopenai.ChatRequestToolMessage{
-				ToolCallID: &toolCall.ID,
-				Content:    azopenai.NewChatRequestToolMessageContent(toolResultStr),
-			})
-
-			title := h.formatToolCallMessage(toolCall.Name, toolCall.Args, nil)
-			message = h.createCollapsibleBlocks(title, formatCallToolResult(toolResultStr), false)
-			timestamp, updateErr = h.updateMessage(channelID, timestamp, slackMessageLines, message)
-			if updateErr != nil {
-				logger.GetLogger().Error("failed to update message", zap.Error(updateErr))
-			}
-			slackMessageLines = append(slackMessageLines, message)
+			// Process successful tool result
+			messages, timestamp, slackMessageLines = h.processToolResult(ctx, channelID, timestamp, threadTS, slackMessageLines, toolCall, toolResult, messages)
 		}
 
 		currentRound++
 
+		// Check for maximum rounds
 		if currentRound >= maxRounds {
-			warningMsg := "⚠️ Reached maximum number of steps. Providing partial response based on current progress..."
-			_ = h.sendMarkdownMessage(channelID, fmt.Sprintf(defaultErrorMessage, warningMsg), threadTS)
-
-			partialResponse := fmt.Sprintf("Reached maximum conversation rounds. Last response: %s", response.Content)
-			return partialResponse, nil
+			return h.handleMaxRoundsReached(channelID, threadTS, response.Content)
 		}
 	}
 
-	return finalResponse, nil
+	return "", nil
+}
+
+// trimMessages ensures messages array doesn't exceed maximum size
+func (h *SlackHandler) trimMessages(messages []azopenai.ChatRequestMessageClassification) []azopenai.ChatRequestMessageClassification {
+	maxMessages := 21 // 1 system prompt + 20 recent messages
+	if len(messages) > maxMessages {
+		systemPrompt := messages[0:1]
+		rest := messages[len(messages)-20:]
+		return append(systemPrompt, rest...)
+	}
+	return messages
+}
+
+// addToolCallToMessages adds a tool call to the messages array
+func (h *SlackHandler) addToolCallToMessages(messages []azopenai.ChatRequestMessageClassification, toolCall openai.ToolCall) []azopenai.ChatRequestMessageClassification {
+	return append(messages, &azopenai.ChatRequestAssistantMessage{
+		Content: azopenai.NewChatRequestAssistantMessageContent(""),
+		ToolCalls: []azopenai.ChatCompletionsToolCallClassification{
+			&azopenai.ChatCompletionsFunctionToolCall{
+				ID:   to.Ptr(toolCall.ID),
+				Type: to.Ptr("function"),
+				Function: &azopenai.FunctionCall{
+					Name:      to.Ptr(toolCall.Name),
+					Arguments: to.Ptr(prettyPrintJSON(toolCall.Args)),
+				},
+			},
+		},
+	})
+}
+
+// executeTool executes a tool call and returns its result
+func (h *SlackHandler) executeTool(ctx context.Context, toolCall openai.ToolCall) (*mcp.CallToolResult, error) {
+	request := mcp.CallToolRequest{
+		Params: struct {
+			Name      string                 `json:"name"`
+			Arguments map[string]interface{} `json:"arguments,omitempty"`
+			Meta      *struct {
+				ProgressToken mcp.ProgressToken `json:"progressToken,omitempty"`
+			} `json:"_meta,omitempty"`
+		}{
+			Name:      toolCall.Name,
+			Arguments: toolCall.Args,
+		},
+	}
+	return h.mcpClient.CallTool(ctx, request)
+}
+
+// processToolResult handles a successful tool execution result
+func (h *SlackHandler) processToolResult(ctx context.Context, channelID, timestamp string, threadTS string, slackMessageLines []string, toolCall openai.ToolCall, result *mcp.CallToolResult, messages []azopenai.ChatRequestMessageClassification) ([]azopenai.ChatRequestMessageClassification, string, []string) {
+	// Format and summarize tool result
+	toolResultStr := printToolResult(result)
+	toolResultStr, _ = h.summarizeIfTooLong(ctx, toolResultStr)
+
+	// Add tool response to messages
+	messages = append(messages, &azopenai.ChatRequestToolMessage{
+		ToolCallID: &toolCall.ID,
+		Content:    azopenai.NewChatRequestToolMessageContent(toolResultStr),
+	})
+
+	// Update progress message
+	title := h.formatToolCallMessage(toolCall.Name, toolCall.Args, nil)
+	slackMessage := h.createCollapsibleBlocks(title, formatCallToolResult(toolResultStr), false)
+
+	if h.shouldCreateNewMessage(slackMessageLines, slackMessage) {
+		timestamp, _ = h.sendMarkdownMessage(channelID, slackMessage, threadTS)
+		slackMessageLines = []string{}
+	} else {
+		slackMessageLines = append(slackMessageLines, slackMessage)
+		_ = h.updateMessage(channelID, timestamp, strings.Join(slackMessageLines, "\n\n"))
+	}
+	slackMessageLines = append(slackMessageLines, slackMessage)
+
+	return messages, timestamp, slackMessageLines
+}
+
+// handleMaxRoundsReached handles the case when maximum conversation rounds are reached
+func (h *SlackHandler) handleMaxRoundsReached(channelID, threadTS, lastResponse string) (string, error) {
+	warningMsg := "⚠️ Reached maximum number of steps. Providing partial response based on current progress..."
+	_, _ = h.sendMarkdownMessage(channelID, fmt.Sprintf(defaultErrorMessage, warningMsg), threadTS)
+	return fmt.Sprintf("Reached maximum conversation rounds. Last response: %s", lastResponse), nil
 }
 
 // createInitialMessages creates the initial message list
