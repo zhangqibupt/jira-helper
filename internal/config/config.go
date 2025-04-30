@@ -24,6 +24,9 @@ type Config struct {
 
 	// S3 configuration for token storage
 	TokenBucketName string // Required: S3 bucket name for storing tokens
+
+	// Log level
+	LogLevel string // Required: Log level
 }
 
 var (
@@ -52,6 +55,8 @@ func Load() (*Config, error) {
 
 		"AZURE_OPENAI_DEPLOYMENT": &cfg.AzureOpenAIDeployment,
 		"TOKEN_BUCKET_NAME":       &cfg.TokenBucketName,
+
+		"LOG_LEVEL": &cfg.LogLevel,
 	}
 
 	var missingVars []string
@@ -70,12 +75,4 @@ func Load() (*Config, error) {
 	instance = cfg
 
 	return cfg, nil
-}
-
-// getEnvWithDefault returns the environment variable value or the default if not set
-func getEnvWithDefault(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return defaultValue
 }

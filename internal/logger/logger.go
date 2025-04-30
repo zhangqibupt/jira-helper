@@ -29,6 +29,9 @@ func Init(level string) error {
 		ErrorOutputPaths: []string{"stderr"},
 	}
 
+	// Disable stack traces
+	config.EncoderConfig.StacktraceKey = ""
+
 	// Create the logger
 	logger, err := config.Build()
 	if err != nil {

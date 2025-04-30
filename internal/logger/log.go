@@ -80,7 +80,7 @@ func GinLogMiddleware() gin.HandlerFunc {
 		if lc, ok := lambdacontext.FromContext(c.Request.Context()); ok {
 			logRecord.RequestID = lc.AwsRequestID
 		} else {
-			GetLogger().Error("Can't get AwsRequestID from *gin.Context")
+			GetLogger().Warn("Can't get AwsRequestID from *gin.Context")
 		}
 
 		c.Next()

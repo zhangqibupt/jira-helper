@@ -19,14 +19,12 @@ import (
 )
 
 func main() {
-	// Initialize logger
-	if err := logger.Init("INFO"); err != nil {
-		log.Fatalf("Failed to initialize logger: %v", err)
-	}
-	defer logger.Sync()
-
 	if IsInLambda() {
 		initConfig()
+		if err := logger.Init(config.Get().LogLevel); err != nil {
+			log.Fatalf("Failed to initialize logger: %v", err)
+		}
+		defer logger.Sync()
 
 		if err := initSlackHandler(); err != nil {
 			log.Fatalf("Failed to initialize slack handler: %v", err)
@@ -45,8 +43,13 @@ func main() {
 		os.Setenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
 
 		os.Setenv("TOKEN_BUCKET_NAME", "jira-helper-tokens")
+		os.Setenv("LOG_LEVEL", "DEBUG")
 
 		initConfig()
+		if err := logger.Init(config.Get().LogLevel); err != nil {
+			log.Fatalf("Failed to initialize logger: %v", err)
+		}
+		defer logger.Sync()
 		if err := initSlackHandler(); err != nil {
 			log.Fatalf("Failed to initialize slack handler: %v", err)
 		}
@@ -67,10 +70,11 @@ func initConfig() {
 func RouterEngine() *gin.Engine {
 	r := gin.New()
 	r.Use(gin.Recovery())
-	r.Use(gin.Logger())
+	r.Use(handler.HandleSlackRetry())
+	r.Use(logger.GinLogMiddleware())
 
 	// Create a group for Slack endpoints with retry handling
-	slackGroup := r.Group("/", handler.HandleSlackRetry())
+	slackGroup := r.Group("/")
 
 	slackGroup.POST("/", slackHandler.HandleRequest)
 	slackGroup.POST("/setup-personal-token", slackHandler.HandleSetupPersonalToken)

@@ -65,7 +65,7 @@ Your personal token will be securely stored and used for all write operations in
 - [ ] Fix token size issue: context length is 128000 tokens
 - [ ] When displaying the issue, translate customized fields to human readable format
 - [ ] Fix the tool call failed but display success message
-- [ ] Reduce the log
+- [x] Reduce the log
 ## Usage
 
 [Documentation to be added]
