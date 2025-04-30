@@ -4,13 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"jira_whisperer/internal/logger"
 	"strings"
 
 	"go.uber.org/zap"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/ai/azopenai"
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/gin-gonic/gin"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/slack-go/slack"
@@ -168,17 +168,44 @@ Output the result as plain text, suitable for direct posting in Slack *without* 
 	return summarized, nil
 }
 
-// updateMessage updates an existing Slack message with new content
-func (h *SlackHandler) updateMessage(channel string, timestamp string, message string) error {
+// updateMessage updates an existing Slack message with new content and returns the message timestamp
+func (h *SlackHandler) updateMessage(channel string, timestamp string, existingLines []string, newLine string) (string, error) {
+	// Add new line to existing lines
+	existingLines = append(existingLines, newLine)
+	message := strings.Join(existingLines, "\n\n")
+
+	// Slack message length limit (approximately 40,000 characters)
+	const maxMessageLength = 40000
+
+	if len(message) > maxMessageLength {
+		// If combined message is too long, send only the new message in the thread
+		logger.GetLogger().Info("Combined message too long, sending new content as separate message",
+			zap.Int("combinedLength", len(message)),
+			zap.Int("maxLength", maxMessageLength))
+
+		// Send new line as a new message in the thread
+		_, newTimestamp, err := h.api.PostMessage(
+			channel,
+			slack.MsgOptionText(newLine, false),
+			slack.MsgOptionTS(timestamp))
+		if err != nil {
+			logger.GetLogger().Error("failed to send new message", zap.Error(err))
+			return timestamp, err
+		}
+
+		return newTimestamp, nil
+	}
+
+	// If message is not too long, update the existing message with all content
 	_, _, _, err := h.api.UpdateMessage(
 		channel,
 		timestamp,
 		slack.MsgOptionText(message, false),
 	)
 	if err != nil {
-		logger.GetLogger().Error(fmt.Sprintf("failed to update message due to %s", err))
+		logger.GetLogger().Error("failed to update message", zap.Error(err))
 	}
-	return nil
+	return timestamp, nil
 }
 
 // Update processQuery to handle conversation history
@@ -190,7 +217,7 @@ func (h *SlackHandler) processQuery(ctx context.Context, query string, history [
 	// Send initial progress message and save its timestamp
 	_, timestamp, err := h.api.PostMessage(
 		channelID,
-		slack.MsgOptionText(strings.Join(slackMessageLines, "\n\n"), false),
+		slack.MsgOptionText(slackMessageLines[0], false),
 		slack.MsgOptionTS(threadTS),
 	)
 	if err != nil {
@@ -242,19 +269,15 @@ func (h *SlackHandler) processQuery(ctx context.Context, query string, history [
 		}
 
 		if response.Content != "" {
+			var updateErr error
+			timestamp, updateErr = h.updateMessage(channelID, timestamp, slackMessageLines, response.Content)
+			if updateErr != nil {
+				logger.GetLogger().Error("failed to update message", zap.Error(updateErr))
+			}
 			slackMessageLines = append(slackMessageLines, response.Content)
-			_ = h.updateMessage(channelID, timestamp, strings.Join(slackMessageLines, "\n\n"))
 		}
 
 		for _, toolCall := range response.ToolCalls {
-			// Update progress with current tool
-			message := fmt.Sprintf("🔄 _Calling Tool *%s*_", toolCall.Name)
-			if len(toolCall.Args) > 0 {
-				message += fmt.Sprintf("\n>_%s_", printJSON(toolCall.Args))
-			}
-			slackMessageLines = append(slackMessageLines, message)
-			_ = h.updateMessage(channelID, timestamp, strings.Join(slackMessageLines, "\n\n"))
-
 			// Add the tool_calls message to messages first
 			messages = append(messages, &azopenai.ChatRequestAssistantMessage{
 				Content: azopenai.NewChatRequestAssistantMessageContent(""),
@@ -270,6 +293,18 @@ func (h *SlackHandler) processQuery(ctx context.Context, query string, history [
 				},
 			})
 
+			// Update progress with current tool
+			message := fmt.Sprintf("🔄 _Calling Tool *%s*_", toolCall.Name)
+			if len(toolCall.Args) > 0 {
+				message += fmt.Sprintf("\n>_%s_", printJSON(toolCall.Args))
+			}
+			var updateErr error
+			timestamp, updateErr = h.updateMessage(channelID, timestamp, slackMessageLines, message)
+			if updateErr != nil {
+				logger.GetLogger().Error("failed to update message", zap.Error(updateErr))
+			}
+			slackMessageLines = append(slackMessageLines, message)
+
 			request := mcp.CallToolRequest{}
 			request.Method = toolCall.Name
 			request.Params.Name = toolCall.Name
@@ -283,8 +318,12 @@ func (h *SlackHandler) processQuery(ctx context.Context, query string, history [
 					Content:    azopenai.NewChatRequestToolMessageContent(err.Error()),
 				})
 				title := h.formatToolCallMessage(toolCall.Name, toolCall.Args, err)
-				blocks := h.createCollapsibleBlocks(title, formatCallToolResult(err.Error()), true)
-				_, _ = h.sendBlockKitMessage(channelID, threadTS, blocks)
+				message := h.createCollapsibleBlocks(title, formatCallToolResult(err.Error()), true)
+				timestamp, updateErr = h.updateMessage(channelID, timestamp, slackMessageLines, message)
+				if updateErr != nil {
+					logger.GetLogger().Error("failed to update message", zap.Error(updateErr))
+				}
+				slackMessageLines = append(slackMessageLines, message)
 				continue
 			}
 
@@ -298,16 +337,19 @@ func (h *SlackHandler) processQuery(ctx context.Context, query string, history [
 			})
 
 			title := h.formatToolCallMessage(toolCall.Name, toolCall.Args, nil)
-			blocks := h.createCollapsibleBlocks(title, formatCallToolResult(toolResultStr), false)
-			_, _ = h.sendBlockKitMessage(channelID, threadTS, blocks)
+			message = h.createCollapsibleBlocks(title, formatCallToolResult(toolResultStr), false)
+			timestamp, updateErr = h.updateMessage(channelID, timestamp, slackMessageLines, message)
+			if updateErr != nil {
+				logger.GetLogger().Error("failed to update message", zap.Error(updateErr))
+			}
+			slackMessageLines = append(slackMessageLines, message)
 		}
 
 		currentRound++
 
 		if currentRound >= maxRounds {
 			warningMsg := "⚠️ Reached maximum number of steps. Providing partial response based on current progress..."
-			slackMessageLines = append(slackMessageLines, warningMsg)
-			_ = h.updateMessage(channelID, timestamp, strings.Join(slackMessageLines, "\n\n"))
+			_ = h.sendMarkdownMessage(channelID, fmt.Sprintf(defaultErrorMessage, warningMsg), threadTS)
 
 			partialResponse := fmt.Sprintf("Reached maximum conversation rounds. Last response: %s", response.Content)
 			return partialResponse, nil
@@ -353,7 +395,7 @@ Your main tasks:
 - Use Slack-supported markdown (e.g. *bold*, > quote), but avoid unsupported formatting (like headers #, tables, or HTML)
 
 When using Jira MCP APIs:
-- When using tool jira_get_issue, you should always use fields: *all as parameter
+- When using tool jira_get_issue, you should always use 'fields: *all' as parameter
 - When using the search tool, try to use pagination to avoid too many results
 - If batch operations is involved, you should use the batch tool first
 
@@ -737,49 +779,13 @@ func (h *SlackHandler) formatToolCallMessage(toolName string, args map[string]in
 }
 
 // createCollapsibleBlocks creates a collapsible message using Block Kit
-func (h *SlackHandler) createCollapsibleBlocks(title string, content string, isError bool) []slack.Block {
+func (h *SlackHandler) createCollapsibleBlocks(title string, content string, isError bool) string {
 	// Create emoji based on message type
 	emoji := "✅️"
 	if isError {
 		emoji = "❌"
 	}
 
-	// Create the title block as a regular section
-	titleBlock := slack.NewSectionBlock(
-		&slack.TextBlockObject{
-			Type: slack.MarkdownType,
-			Text: fmt.Sprintf("%s _%s_", emoji, title),
-		},
-		nil,
-		nil,
-	)
-
-	// Create the content block with context formatting
-	contentBlock := slack.NewSectionBlock(
-		&slack.TextBlockObject{
-			Type: slack.MarkdownType,
-			Text: content,
-		},
-		nil,
-		nil,
-	)
-
-	// Create a divider for better visual separation
-	// dividerBlock := slack.NewDividerBlock()
-
-	return []slack.Block{titleBlock, contentBlock}
-}
-
-// sendBlockKitMessage sends a message using Block Kit
-func (h *SlackHandler) sendBlockKitMessage(channelID string, threadTS string, blocks []slack.Block) (string, error) {
-	_, timestamp, err := h.api.PostMessage(
-		channelID,
-		slack.MsgOptionBlocks(blocks...),
-		slack.MsgOptionTS(threadTS),
-	)
-	if err != nil {
-		logger.GetLogger().Error("failed to send block kit message", zap.Error(err))
-		return "", err
-	}
-	return timestamp, nil
+	// Format the message with title and content
+	return fmt.Sprintf("%s _%s_\n%s", emoji, title, content)
 }
