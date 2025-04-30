@@ -18,10 +18,11 @@ import (
 )
 
 type SlackHandler struct {
-	api        *slack.Client
-	mcpClient  *client.Client
-	aiClient   *openai.Client
-	tokenStore storage.TokenStore
+	api          *slack.Client
+	mcpClient    *client.Client
+	aiClient     *openai.Client
+	tokenStore   storage.TokenStore
+	msgFormatter *ToolMessageFormatter
 }
 
 // HistoryMessage represents a message in the conversation history
