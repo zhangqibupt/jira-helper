@@ -1,4 +1,4 @@
-module jira_whisperer
+module jira_helper
 
 go 1.23.0
 

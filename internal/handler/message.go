@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"jira_whisperer/internal/logger"
+	"jira_helper/internal/logger"
 
 	"github.com/slack-go/slack"
 	"go.uber.org/zap"
@@ -12,6 +12,9 @@ import (
 
 // sendEphemeralSlackMessage sends an ephemeral message to Slack
 func (h *SlackHandler) sendEphemeralSlackMessage(channel string, message string, threadTS string) error {
+	if message == "" {
+		return nil
+	}
 	_, _, err := h.api.PostMessage(
 		channel,
 		slack.MsgOptionText(message, false),
@@ -24,6 +27,10 @@ func (h *SlackHandler) sendEphemeralSlackMessage(channel string, message string,
 
 // sendMarkdownMessage sends a message to Slack with Markdown formatting enabled
 func (h *SlackHandler) sendMarkdownMessage(channel string, message string, threadTS string) (string, error) {
+	if message == "" {
+		return "", nil
+	}
+
 	_, timestamp, err := h.api.PostMessage(
 		channel,
 		slack.MsgOptionText(message, false),
@@ -62,6 +69,9 @@ func (h *SlackHandler) shouldCreateNewMessage(existingLines []string, newLine st
 
 // createNewMessage creates a new message in a thread and returns its timestamp
 func (h *SlackHandler) createNewMessage(channel string, threadTS string, message string) (string, error) {
+	if message == "" {
+		return "", nil
+	}
 	_, timestamp, err := h.api.PostMessage(
 		channel,
 		slack.MsgOptionText(message, false),

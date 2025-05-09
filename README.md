@@ -1,4 +1,4 @@
-# Jira Whisperer
+# jira helper
 
 A powerful tool to interact with Jira through natural language commands, making Jira task management more intuitive and efficient.
 
@@ -59,11 +59,11 @@ Your personal token will be securely stored and used for all write operations in
 - [x] Fix get history thread error
 - [x] Support DM message
 - [x] Add contact info in APP description
-- [ ] Support multipe repied to show thinking logic. maybe just edit the previous message.
+- [x] Support multipe repied to show thinking logic. maybe just edit the previous message.
 - [ ] Use READ_ONLY_MODE to enable/disable write operations
-- [ ] Remove home page for slack bot
-- [ ] Fix token size issue: context length is 128000 tokens
-- [ ] When displaying the issue, translate customized fields to human readable format
+- [x] Remove home page for slack bot
+- [x] Fix token size issue: context length is 128000 tokens
+- [x] When displaying the issue, translate customized fields to human readable format
 - [ ] Fix the tool call failed but display success message
 - [x] Reduce the log
 ## Usage

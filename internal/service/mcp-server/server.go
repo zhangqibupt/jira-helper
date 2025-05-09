@@ -8,7 +8,7 @@ import (
 func NewServer() (*server.MCPServer, error) {
 	// Create MCP server
 	s := server.NewMCPServer(
-		"Jira Whisperer",
+		"jira helper",
 		"1.0.0",
 	)
 

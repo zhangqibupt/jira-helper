@@ -3,10 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
-	"jira_whisperer/internal/config"
-	"jira_whisperer/internal/handler"
-	"jira_whisperer/internal/logger"
-	"jira_whisperer/internal/storage"
+	"jira_helper/internal/config"
+	"jira_helper/internal/handler"
+	"jira_helper/internal/logger"
+	"jira_helper/internal/storage"
 	"log"
 	"os"
 

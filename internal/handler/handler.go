@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"jira_whisperer/internal/logger"
+	"jira_helper/internal/logger"
 	"strings"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
@@ -17,7 +17,7 @@ import (
 	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/slackevents"
 
-	"jira_whisperer/internal/service/openai"
+	"jira_helper/internal/service/openai"
 )
 
 func (h *SlackHandler) HandleRequest(c *gin.Context) {
@@ -270,8 +270,8 @@ func (h *SlackHandler) processToolResult(ctx context.Context, channelID, timesta
 // handleMaxRoundsReached handles the case when maximum conversation rounds are reached
 func (h *SlackHandler) handleMaxRoundsReached(channelID, threadTS, lastResponse string) (string, error) {
 	warningMsg := "⚠️ Reached maximum number of steps. Providing partial response based on current progress..."
-	_, _ = h.sendMarkdownMessage(channelID, fmt.Sprintf(defaultErrorMessage, warningMsg), threadTS)
-	return fmt.Sprintf("Reached maximum conversation rounds. Last response: %s", lastResponse), nil
+	_, _ = h.sendMarkdownMessage(channelID, warningMsg, threadTS)
+	return fmt.Sprintf("Reached maximum conversation rounds. Last response: %s. \nDo you want me to continue?", lastResponse), nil
 }
 
 // createInitialMessages creates the initial message list

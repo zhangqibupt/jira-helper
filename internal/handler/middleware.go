@@ -1,7 +1,7 @@
 package handler
 
 import (
-	"jira_whisperer/internal/logger"
+	"jira_helper/internal/logger"
 	"net/http"
 
 	"github.com/gin-gonic/gin"

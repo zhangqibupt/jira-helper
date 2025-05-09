@@ -3,7 +3,7 @@ package handler
 import (
 	"context"
 	"fmt"
-	"jira_whisperer/internal/logger"
+	"jira_helper/internal/logger"
 	"strings"
 	"time"
 

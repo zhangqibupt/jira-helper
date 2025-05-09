@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"github.com/mark3labs/mcp-go/mcp"
 	"go.uber.org/zap"
-	"jira_whisperer/internal/logger"
+	"jira_helper/internal/logger"
 	"strings"
 )
 

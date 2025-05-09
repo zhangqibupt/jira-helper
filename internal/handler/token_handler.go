@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"jira_whisperer/internal/logger"
+	"jira_helper/internal/logger"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
