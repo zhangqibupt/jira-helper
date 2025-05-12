@@ -95,7 +95,13 @@ func IsInLambda() bool {
 
 var slackHandler *handler.SlackHandler
 
-const encryptionKey = "D3ER7lB0Cj9n4HzG0Azjym/l3l1edSN6Dnth9InjVu8="
+// 32-byte key for AES-256 encryption
+var encryptionKey = []byte{
+	0x0f, 0x71, 0x11, 0xee, 0x50, 0x74, 0x08, 0x3f,
+	0x67, 0xe0, 0x0c, 0x23, 0xca, 0x6f, 0xe5, 0xde,
+	0x75, 0x23, 0x7a, 0x0e, 0x7b, 0x61, 0xf4, 0x89,
+	0xe3, 0x56, 0xed, 0x0f, 0x7a, 0x9d, 0xf4, 0x89,
+}
 
 func initSlackHandler() error {
 	cfg := config.Get()
@@ -109,11 +115,11 @@ func initSlackHandler() error {
 	// Create S3 client
 	s3Client := s3.NewFromConfig(awsCfg)
 
-	// Create token store
+	// Create token store with direct 32-byte key
 	tokenStore := storage.NewS3TokenStore(
 		s3Client,
 		cfg.TokenBucketName,
-		[]byte(encryptionKey),
+		encryptionKey,
 	)
 
 	slackHandler, err = handler.NewSlackHandler(

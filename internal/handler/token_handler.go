@@ -18,29 +18,33 @@ type TokenRequest struct {
 
 // HandleSetupPersonalToken handles the POST request to /setup-personal-token
 func (h *SlackHandler) HandleSetupPersonalToken(c *gin.Context) {
-	var req TokenRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		logger.GetLogger().Error("invalid request body", zap.Error(err))
-		_ = h.sendEphemeralSlackMessage(req.ChannelID, fmt.Sprintf(defaultErrorMessage, err.Error()), "")
-		c.JSON(http.StatusOK, gin.H{"error": "Invalid request body"})
+	userID := c.PostForm("user_id")
+	text := c.PostForm("text")
+	channelID := c.PostForm("channel_id")
+
+	if userID == "" || text == "" || channelID == "" {
+		logger.GetLogger().Error("missing required fields")
+		// _ = h.sendEphemeralSlackMessage(channelID, "Missing required fields", "")
+		c.JSON(http.StatusOK, gin.H{"error": "Missing required fields"})
 		return
 	}
-	if err := h.validateToken(req.Text, req.ChannelID, c); err != nil {
+
+	if err := h.validateToken(text); err != nil {
 		logger.GetLogger().Error("invalid token", zap.Error(err))
-		_ = h.sendEphemeralSlackMessage(req.ChannelID, err.Error(), "")
-		c.JSON(http.StatusOK, gin.H{"error": "Invalid token"})
+		// _ = h.sendEphemeralSlackMessage(channelID, err.Error(), "")
+		c.JSON(http.StatusOK, gin.H{"error": fmt.Sprintf("Validation failed due to %s", err.Error())})
 		return
 	}
 
 	// Store the token in S3
-	if err := h.tokenStore.SetToken(req.UserID, req.Text); err != nil {
+	if err := h.tokenStore.SetToken(userID, text); err != nil {
 		logger.GetLogger().Error("failed to store token", zap.Error(err))
-		_ = h.sendEphemeralSlackMessage(req.ChannelID, fmt.Sprintf("failed to store token: %v", err), "")
-		c.JSON(http.StatusOK, gin.H{"error": "Failed to store token"})
+		// _ = h.sendEphemeralSlackMessage(channelID, fmt.Sprintf("failed to store token: %v", err), "")
+		c.JSON(http.StatusOK, gin.H{"error": fmt.Sprintf("Failed to store token due to %s", err.Error())})
 		return
 	}
 
-	_ = h.sendEphemeralSlackMessage(req.ChannelID, "Token successfully stored", "")
+	// _ = h.sendEphemeralSlackMessage(channelID, "Token successfully stored", "")
 
 	// Return success response
 	c.JSON(http.StatusOK, gin.H{
@@ -48,11 +52,11 @@ func (h *SlackHandler) HandleSetupPersonalToken(c *gin.Context) {
 	})
 }
 
-func (h *SlackHandler) validateToken(token string, channelID string, c *gin.Context) error {
+func (h *SlackHandler) validateToken(token string) error {
 	// Validate token format
 	if len(token) < 8 {
 		logger.GetLogger().Error("token too short")
-		_ = h.sendEphemeralSlackMessage(channelID, "Token must be at least 8 characters long", "")
+		//_ = h.sendEphemeralSlackMessage(channelID, "Token must be at least 8 characters long", "")
 
 		return fmt.Errorf("token too short")
 	}
