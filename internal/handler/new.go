@@ -5,24 +5,27 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/mark3labs/mcp-go/client"
-	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/slack-go/slack"
-	"go.uber.org/zap"
 	"jira_helper/internal/logger"
 	"jira_helper/internal/service/openai"
 	"jira_helper/internal/storage"
 	"log"
 	"os"
 	"time"
+
+	"github.com/mark3labs/mcp-go/mcp"
+
+	"github.com/mark3labs/mcp-go/client"
+	"github.com/slack-go/slack"
+	"go.uber.org/zap"
 )
 
 type SlackHandler struct {
-	api          *slack.Client
-	mcpClient    *client.Client
-	aiClient     *openai.Client
-	tokenStore   storage.TokenStore
-	msgFormatter *ToolMessageFormatter
+	api              *slack.Client
+	defaultMcpClient *client.Client // MCP client with default token
+	aiClient         *openai.Client
+	tokenStore       storage.TokenStore
+	msgFormatter     *ToolMessageFormatter
+	defaultJiraToken string // Default Jira token
 }
 
 // HistoryMessage represents a message in the conversation history
@@ -31,7 +34,7 @@ type HistoryMessage struct {
 	Content string
 }
 
-func NewSlackHandler(token string, aiEndpoint string, aiKey string, aiDeployment string, tokenStore storage.TokenStore) (*SlackHandler, error) {
+func NewSlackHandler(token string, aiEndpoint string, aiKey string, aiDeployment string, defaultJiraToken string, tokenStore storage.TokenStore) (*SlackHandler, error) {
 	// Ensure cache directory exists
 	cacheDir := "/tmp/uvx-cache"
 	if err := os.MkdirAll(cacheDir, 0755); err != nil {
@@ -45,25 +48,24 @@ func NewSlackHandler(token string, aiEndpoint string, aiKey string, aiDeployment
 	if err != nil {
 		return nil, fmt.Errorf("failed to create uvx log file: %v", err)
 	}
-	// Close the write-only log file as we'll reopen it for reading
 	logFile.Close()
 
-	mcpClient, err := client.NewStdioMCPClient(
+	// Initialize the default MCP client with the default token
+	defaultMcpClient, err := client.NewStdioMCPClient(
 		"uvx", []string{
-			"UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple",
 			"UV_CACHE_DIR=/tmp/uvx-cache",
+			"UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple",
 		},
 		"mcp-atlassian",
 		"--jira-url=https://jira.freewheel.tv",
-		"--jira-personal-token=MTE4MjU2NDAwNTU0Og/vNsKe89/quErTcSkk6XDr/u0O",
+		fmt.Sprintf("--jira-personal-token=%s", defaultJiraToken),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create MCP client: %v", err)
+		return nil, fmt.Errorf("failed to create default MCP client: %v", err)
 	}
 
 	// Set up a goroutine to monitor the log file
 	go func() {
-		// Open the file for reading in the monitoring goroutine
 		readLogFile, err := os.OpenFile("/tmp/uvx.log", os.O_RDONLY, 0644)
 		if err != nil {
 			logger.GetLogger().Error("failed to open uvx log file for reading", zap.Error(err))
@@ -71,13 +73,11 @@ func NewSlackHandler(token string, aiEndpoint string, aiKey string, aiDeployment
 		}
 		defer readLogFile.Close()
 
-		// Seek to the end of the file
 		if _, err := readLogFile.Seek(0, 2); err != nil {
 			logger.GetLogger().Error("failed to seek to end of uvx log file", zap.Error(err))
 			return
 		}
 
-		// Create a scanner to read the log file
 		scanner := bufio.NewScanner(readLogFile)
 		for {
 			for scanner.Scan() {
@@ -87,29 +87,77 @@ func NewSlackHandler(token string, aiEndpoint string, aiKey string, aiDeployment
 				logger.GetLogger().Error("error reading uvx log file", zap.Error(err))
 				return
 			}
-
-			// Wait a short time before checking for new content
 			time.Sleep(100 * time.Millisecond)
-
-			// Check if there's new content
-			currentPos, err := readLogFile.Seek(0, 1) // Get current position
+			currentPos, err := readLogFile.Seek(0, 1)
 			if err != nil {
 				logger.GetLogger().Error("failed to get current file position", zap.Error(err))
 				return
 			}
-
 			fileInfo, err := readLogFile.Stat()
 			if err != nil {
 				logger.GetLogger().Error("failed to get file info", zap.Error(err))
 				return
 			}
-
 			if currentPos < fileInfo.Size() {
-				// There's new content, continue reading
 				continue
 			}
 		}
 	}()
+
+	initRequest := mcp.InitializeRequest{}
+	initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
+	initRequest.Params.ClientInfo = mcp.Implementation{
+		Name:    "test-client",
+		Version: "1.0.0",
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	logger.GetLogger().Info("Initializing MCP client")
+	initResult, err := defaultMcpClient.Initialize(ctx, initRequest)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			logger.GetLogger().Fatal("MCP client initialization timed out")
+		} else {
+			logger.GetLogger().Fatal("MCP client initialization failed", zap.Error(err))
+		}
+		return nil, fmt.Errorf("failed to initialize MCP client: %v", err)
+	}
+
+	log.Printf("Successfully initialized client: %v", initResult)
+
+	aiClient, err := openai.NewClient(aiEndpoint, aiKey, aiDeployment)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create OpenAI client: %v", err)
+	}
+
+	return &SlackHandler{
+		api:              slack.New(token),
+		defaultMcpClient: defaultMcpClient,
+		aiClient:         aiClient,
+		tokenStore:       tokenStore,
+		defaultJiraToken: defaultJiraToken,
+	}, nil
+}
+
+// getMcpClient returns the default MCP client if userToken is empty, otherwise creates a new MCP client with the user token.
+// The returned cleanup function should be called after using the client if it is not the default client.
+func (h *SlackHandler) getMcpClient(userToken string) (*client.Client, func(), error) {
+	if userToken == "" {
+		// Use the default client, no cleanup needed
+		return h.defaultMcpClient, func() {}, nil
+	}
+	// Create a new MCP client with the user-supplied token
+	mcpClient, err := client.NewStdioMCPClient(
+		"uvx", []string{
+			"UV_CACHE_DIR=/tmp/uvx-cache",
+		},
+		"mcp-atlassian",
+		"--jira-url=https://jira.freewheel.tv",
+		fmt.Sprintf("--jira-personal-token=%s", userToken),
+	)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	initRequest := mcp.InitializeRequest{}
 	initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
@@ -127,18 +175,13 @@ func NewSlackHandler(token string, aiEndpoint string, aiKey string, aiDeployment
 		} else {
 			logger.GetLogger().Fatal("MCP client initialization failed", zap.Error(err))
 		}
+		return nil, nil, fmt.Errorf("failed to initialize MCP client: %v", err)
 	}
+
 	log.Printf("Successfully initialized client: %v", initResult)
-
-	aiClient, err := openai.NewClient(aiEndpoint, aiKey, aiDeployment)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create OpenAI client: %v", err)
-	}
-
-	return &SlackHandler{
-		api:        slack.New(token),
-		mcpClient:  mcpClient,
-		aiClient:   aiClient,
-		tokenStore: tokenStore,
+	return mcpClient, func() {
+		if err := mcpClient.Close(); err != nil {
+			logger.GetLogger().Error("failed to close MCP client", zap.Error(err))
+		}
 	}, nil
 }

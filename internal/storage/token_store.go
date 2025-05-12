@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -43,9 +44,11 @@ func NewS3TokenStore(client *s3.Client, bucketName string, encryptKey []byte) *S
 
 // GetToken retrieves and decrypts a token for the given user ID
 func (s *S3TokenStore) GetToken(userID string) (string, error) {
-	key := s.getKey(userID)
+	ctx, cancel := context.WithTimeout(context.TODO(), 20*time.Second)
+	defer cancel()
 
-	result, err := s.client.GetObject(context.TODO(), &s3.GetObjectInput{
+	key := s.getKey(userID)
+	result, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucketName),
 		Key:    aws.String(key),
 	})

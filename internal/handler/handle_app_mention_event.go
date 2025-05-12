@@ -38,7 +38,7 @@ func (h *SlackHandler) handleAppMentionEvent(ev *slackevents.AppMentionEvent) er
 	}
 
 	// Process the query with context
-	response, err := h.processQuery(ctx, ev.Text, history, ev.Channel, threadTS)
+	response, err := h.processQuery(ctx, ev.Text, history, ev.Channel, threadTS, ev.User)
 	if err != nil {
 		return fmt.Errorf("failed to process query: %v", err)
 	}

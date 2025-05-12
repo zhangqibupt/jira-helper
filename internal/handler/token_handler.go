@@ -21,23 +21,26 @@ func (h *SlackHandler) HandleSetupPersonalToken(c *gin.Context) {
 	var req TokenRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		logger.GetLogger().Error("invalid request body", zap.Error(err))
-
 		_ = h.sendEphemeralSlackMessage(req.ChannelID, fmt.Sprintf(defaultErrorMessage, err.Error()), "")
 		c.JSON(http.StatusOK, gin.H{"error": "Invalid request body"})
 		return
 	}
 	if err := h.validateToken(req.Text, req.ChannelID, c); err != nil {
+		logger.GetLogger().Error("invalid token", zap.Error(err))
+		_ = h.sendEphemeralSlackMessage(req.ChannelID, err.Error(), "")
+		c.JSON(http.StatusOK, gin.H{"error": "Invalid token"})
 		return
 	}
 
 	// Store the token in S3
 	if err := h.tokenStore.SetToken(req.UserID, req.Text); err != nil {
 		logger.GetLogger().Error("failed to store token", zap.Error(err))
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to store token",
-		})
+		_ = h.sendEphemeralSlackMessage(req.ChannelID, fmt.Sprintf("failed to store token: %v", err), "")
+		c.JSON(http.StatusOK, gin.H{"error": "Failed to store token"})
 		return
 	}
+
+	_ = h.sendEphemeralSlackMessage(req.ChannelID, "Token successfully stored", "")
 
 	// Return success response
 	c.JSON(http.StatusOK, gin.H{

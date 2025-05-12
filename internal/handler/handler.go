@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"jira_helper/internal/logger"
+	"slices"
 	"strings"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
@@ -80,8 +81,16 @@ func (h *SlackHandler) HandleRequest(c *gin.Context) {
 	c.JSON(200, gin.H{"status": "ok"})
 }
 
+// getUserPersonalToken retrieves the user's personal token from the token store.
+func (h *SlackHandler) getUserPersonalToken(userID string) (string, error) {
+	if userID == "" {
+		return "", nil
+	}
+	return h.tokenStore.GetToken(userID)
+}
+
 // processQuery handles the main conversation flow with the AI model
-func (h *SlackHandler) processQuery(ctx context.Context, query string, history []HistoryMessage, channelID string, threadTS string) (string, error) {
+func (h *SlackHandler) processQuery(ctx context.Context, query string, history []HistoryMessage, channelID string, threadTS string, userID string) (string, error) {
 	// Initialize and send progress message
 	initialMessage := "⏳ Analyzing your request to determine the best way to help you..."
 	timestamp, _ := h.sendMarkdownMessage(channelID, initialMessage, threadTS)
@@ -93,17 +102,26 @@ func (h *SlackHandler) processQuery(ctx context.Context, query string, history [
 		return "", err
 	}
 
-	// Run the conversation loop
-	return h.runConversationLoop(ctx, channelID, threadTS, timestamp, messages, openAITools, slackMessageLines)
+	// Fetch user's personal token if available
+	userToken, err := h.getUserPersonalToken(userID)
+	if err != nil {
+		_, _ = h.sendMarkdownMessage(channelID, fmt.Sprintf(defaultErrorMessage, err.Error()), threadTS)
+		return "", fmt.Errorf("failed to get user personal token: %v", err)
+	}
+
+	// Run the conversation loop with the user token
+	return h.runConversationLoop(ctx, channelID, threadTS, timestamp, messages, openAITools, slackMessageLines, userToken)
 }
 
 // prepareConversation sets up the tools and initial messages for the conversation
 func (h *SlackHandler) prepareConversation(ctx context.Context, query string, history []HistoryMessage) ([]openai.Tool, []azopenai.ChatRequestMessageClassification, error) {
 	// Get available tools
-	tools, err := h.mcpClient.ListTools(ctx, mcp.ListToolsRequest{})
+	tools, err := h.defaultMcpClient.ListTools(ctx, mcp.ListToolsRequest{})
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to list tools: %v", err)
 	}
+
+	logger.GetLogger().Info("Available tools", zap.Any("tools", tools.Tools))
 
 	// Convert tools to OpenAI format
 	openAITools := h.convertToolsToOpenAIFormat(tools.Tools)
@@ -128,10 +146,37 @@ func (h *SlackHandler) convertToolsToOpenAIFormat(tools []mcp.Tool) []openai.Too
 	return openAITools
 }
 
+var writableJiraTools = []string{
+	"jira_create_issue",
+	"jira_batch_create_issues",
+	"jira_update_issue",
+	"jira_delete_issue",
+	"jira_add_comment",
+	"jira_add_worklog",
+	"jira_link_to_epic",
+	"jira_create_issue_link",
+	"jira_remove_issue_link",
+	"jira_transition_issue",
+	"jira_create_sprint",
+	"jira_update_sprint",
+	"confluence_add_label",
+	"confluence_create_page",
+	"confluence_update_page",
+	"confluence_delete_page",
+}
+
 // runConversationLoop handles the main conversation loop with the AI model
-func (h *SlackHandler) runConversationLoop(ctx context.Context, channelID, threadTS, timestamp string, messages []azopenai.ChatRequestMessageClassification, openAITools []openai.Tool, slackMessageLines []string) (string, error) {
+func (h *SlackHandler) runConversationLoop(ctx context.Context, channelID, threadTS, timestamp string, messages []azopenai.ChatRequestMessageClassification, openAITools []openai.Tool, slackMessageLines []string, userToken string) (string, error) {
 	maxRounds := 20
 	currentRound := 0
+
+	// Get the appropriate MCP client for this user
+	mcpClient, cleanup, err := h.getMcpClient(userToken)
+	if err != nil {
+		_, _ = h.sendMarkdownMessage(channelID, fmt.Sprintf(defaultErrorMessage, err.Error()), threadTS)
+		return "", fmt.Errorf("failed to get MCP client: %v", err)
+	}
+	defer cleanup()
 
 	for currentRound < maxRounds {
 		// Trim messages if needed
@@ -157,6 +202,12 @@ func (h *SlackHandler) runConversationLoop(ctx context.Context, channelID, threa
 
 		// Handle tool calls
 		for _, toolCall := range response.ToolCalls {
+			// If the tool is in below list and userToken is empty, should not call and return error
+			if slices.Contains(writableJiraTools, toolCall.Name) && userToken == "" {
+				_, _ = h.sendMarkdownMessage(channelID, fmt.Sprintf("❌ Permission denied. You should set your personal token first to use `%s`", toolCall.Name), threadTS)
+				return "", fmt.Errorf("you don't have permission to use this tool")
+			}
+
 			// Add tool call to messages
 			messages = h.addToolCallToMessages(messages, toolCall)
 
@@ -170,7 +221,7 @@ func (h *SlackHandler) runConversationLoop(ctx context.Context, channelID, threa
 			_ = h.updateMessage(channelID, timestamp, strings.Join(slackMessageLines, "\n\n"))
 
 			// Execute tool and handle response
-			toolResult, err := h.executeTool(ctx, toolCall)
+			toolResult, err := h.executeToolWithClient(ctx, toolCall, mcpClient)
 			if err != nil {
 				messages = append(messages, &azopenai.ChatRequestToolMessage{
 					ToolCallID: &toolCall.ID,
@@ -222,8 +273,10 @@ func (h *SlackHandler) addToolCallToMessages(messages []azopenai.ChatRequestMess
 	})
 }
 
-// executeTool executes a tool call and returns its result
-func (h *SlackHandler) executeTool(ctx context.Context, toolCall openai.ToolCall) (*mcp.CallToolResult, error) {
+// executeToolWithClient executes a tool call using the provided MCP client.
+func (h *SlackHandler) executeToolWithClient(ctx context.Context, toolCall openai.ToolCall, mcpClient interface {
+	CallTool(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error)
+}) (*mcp.CallToolResult, error) {
 	request := mcp.CallToolRequest{
 		Params: struct {
 			Name      string                 `json:"name"`
@@ -236,7 +289,7 @@ func (h *SlackHandler) executeTool(ctx context.Context, toolCall openai.ToolCall
 			Arguments: toolCall.Args,
 		},
 	}
-	return h.mcpClient.CallTool(ctx, request)
+	return mcpClient.CallTool(ctx, request)
 }
 
 // processToolResult handles a successful tool execution result

@@ -60,7 +60,7 @@ func (h *SlackHandler) handleMessageEvent(ev *slackevents.MessageEvent) error {
 	}
 
 	// Process the query with context
-	response, err := h.processQuery(ctx, text, history, ev.Channel, threadTS)
+	response, err := h.processQuery(ctx, text, history, ev.Channel, threadTS, ev.User)
 	if err != nil {
 		return fmt.Errorf("failed to process query: %v", err)
 	}

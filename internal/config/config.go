@@ -25,6 +25,9 @@ type Config struct {
 	// S3 configuration for token storage
 	TokenBucketName string // Required: S3 bucket name for storing tokens
 
+	// Jira configuration
+	DefaultJiraToken string //
+
 	// Log level
 	LogLevel string // Required: Log level
 }
@@ -55,6 +58,8 @@ func Load() (*Config, error) {
 
 		"AZURE_OPENAI_DEPLOYMENT": &cfg.AzureOpenAIDeployment,
 		"TOKEN_BUCKET_NAME":       &cfg.TokenBucketName,
+
+		"DEFAULT_JIRA_TOKEN": &cfg.DefaultJiraToken,
 
 		"LOG_LEVEL": &cfg.LogLevel,
 	}

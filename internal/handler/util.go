@@ -3,10 +3,11 @@ package handler
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/mark3labs/mcp-go/mcp"
-	"go.uber.org/zap"
 	"jira_helper/internal/logger"
 	"strings"
+
+	"github.com/mark3labs/mcp-go/mcp"
+	"go.uber.org/zap"
 )
 
 func ensureValidSchema(schema json.RawMessage) json.RawMessage {
@@ -64,4 +65,5 @@ func printToolResult(result *mcp.CallToolResult) string {
 	return ""
 }
 
-const defaultErrorMessage = "Something went wrong while processing your request. Please try again later or contact @qzhang for help. Error: %s"
+// add error emoji to the error message
+const defaultErrorMessage = "❌ Something went wrong while processing your request. Please try again later or contact <@U0ZGB1ZLP> for help. ```Error: %s```"
