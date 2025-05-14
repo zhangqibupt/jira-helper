@@ -1,20 +1,16 @@
-FROM public.ecr.aws/lambda/provided:al2
+FROM public.ecr.aws/lambda/python:3.9
 
-# Install UVX dependencies and required packages
+# 安装编译工具链
 RUN yum update -y && \
-    yum install -y gcc make openssl-devel python3 python3-pip && \
-    yum clean all
+    yum install -y gcc gcc-c++ make gcc-aarch64-linux-gnu gcc-c++-aarch64-linux-gnu
 
-# Create directory for UVX and set up Python environment
-RUN mkdir -p /opt/uvx && \
-    python3 -m pip install --upgrade pip && \
-    python3 -m pip install uvx
+# 安装 uvx 和缓存（使用预编译的二进制包）
+RUN python3 -m pip install --upgrade pip && \
+    python3 -m pip install --only-binary :all: -i https://pypi.tuna.tsinghua.edu.cn/simple uvx && \
+    uvx mcp-atlassian
 
-# Install and cache MCP-Atlassian
-RUN uvx mcp-atlassian --cache-only
-
-# Copy the pre-built binary
+# 复制主程序
 COPY build/lambda/main /main
+RUN chmod +x /main
 
-# Set the CMD to your handler
-ENTRYPOINT [ "/main" ]
+ENTRYPOINT ["/main"]
