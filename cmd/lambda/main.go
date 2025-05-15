@@ -61,7 +61,7 @@ func main() {
 			log.Fatalf("Failed to initialize slack handler: %v", err)
 		}
 		r := RouterEngine()
-		if err := r.Run("localhost:3000"); err != nil {
+		if err := r.Run(":3000"); err != nil {
 			log.Fatal("Server is shutting down due to ", err)
 		}
 	}

@@ -149,7 +149,7 @@ func (h *SlackHandler) getMcpClient(userToken string) (*client.Client, func(), e
 	// Create a new MCP client with the user-supplied token
 	mcpClient, err := client.NewStdioMCPClient(
 		"uvx", []string{
-			"UV_CACHE_DIR=/tmp/uvx-cache",
+			//"UV_OFFLINE=1", // The required dependency for uvx should be cached in docker image
 		},
 		"mcp-atlassian",
 		"--jira-url=https://jira.freewheel.tv",
@@ -178,7 +178,7 @@ func (h *SlackHandler) getMcpClient(userToken string) (*client.Client, func(), e
 		return nil, nil, fmt.Errorf("failed to initialize MCP client: %v", err)
 	}
 
-	log.Printf("Successfully initialized client: %v", initResult)
+	logger.GetLogger().Info(fmt.Sprintf("Successfully initialized client: %v", initResult))
 	return mcpClient, func() {
 		if err := mcpClient.Close(); err != nil {
 			logger.GetLogger().Error("failed to close MCP client", zap.Error(err))

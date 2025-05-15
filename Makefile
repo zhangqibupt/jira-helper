@@ -7,7 +7,7 @@ BINARY_PATH=$(BUILD_DIR)/lambda/main
 
 # Go build flags
 GOOS=linux
-GOARCH=amd64
+GOARCH=arm64
 GO_BUILD_FLAGS=-ldflags="-s -w"
 
 all: clean build zip
