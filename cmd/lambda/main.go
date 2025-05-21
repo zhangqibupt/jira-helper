@@ -20,6 +20,8 @@ import (
 
 func main() {
 	if IsInLambda() {
+		logger.GetLogger().Info("Running in AWS Lambda")
+
 		initConfig()
 		if err := logger.Init(config.Get().LogLevel); err != nil {
 			log.Fatalf("Failed to initialize logger: %v", err)
@@ -31,11 +33,12 @@ func main() {
 		}
 		r := RouterEngine()
 		ginLambda := ginadapter.New(r)
-		rawHandler := func(ctx context.Context, req events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
-			return ginLambda.ProxyWithContext(ctx, req)
+		rawHandler := func(ctx context.Context, req events.LambdaFunctionURLRequest) (events.LambdaFunctionURLResponse, error) {
+			return ginLambda.ProxyFunctionURLWithContext(ctx, req)
 		}
 		lambda.Start(rawHandler)
 	} else {
+		logger.GetLogger().Info("Running locally")
 		os.Setenv("SLACK_BOT_TOKEN", "xoxb-4050481344-8783872636801-4fzL7TQ5iXne8BRIxKVvnmBI")
 
 		os.Setenv("AZURE_OPENAI_ENDPOINT", "https://test-gpt-4o-mini-3.openai.azure.com/")

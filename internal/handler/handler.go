@@ -99,6 +99,7 @@ func (h *SlackHandler) processQuery(ctx context.Context, query string, history [
 	// Prepare tools and messages
 	openAITools, messages, err := h.prepareConversation(ctx, query, history)
 	if err != nil {
+		_, _ = h.sendMarkdownMessage(channelID, fmt.Sprintf(defaultErrorMessage, err.Error()), threadTS)
 		return "", err
 	}
 
@@ -115,13 +116,18 @@ func (h *SlackHandler) processQuery(ctx context.Context, query string, history [
 
 // prepareConversation sets up the tools and initial messages for the conversation
 func (h *SlackHandler) prepareConversation(ctx context.Context, query string, history []HistoryMessage) ([]openai.Tool, []azopenai.ChatRequestMessageClassification, error) {
+	// Ensure defaultMcpClient is initialized (lazy load)
+	if err := h.ensureDefaultMcpClient(); err != nil {
+		return nil, nil, fmt.Errorf("failed to initialize MCP client: %v", err)
+	}
+
 	// Get available tools
 	tools, err := h.defaultMcpClient.ListTools(ctx, mcp.ListToolsRequest{})
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to list tools: %v", err)
 	}
 
-	logger.GetLogger().Info("Available tools", zap.Any("tools", tools.Tools))
+	//logger.GetLogger().Info("Available tools", zap.Any("tools", tools.Tools))
 
 	// Convert tools to OpenAI format
 	openAITools := h.convertToolsToOpenAIFormat(tools.Tools)
@@ -277,18 +283,10 @@ func (h *SlackHandler) addToolCallToMessages(messages []azopenai.ChatRequestMess
 func (h *SlackHandler) executeToolWithClient(ctx context.Context, toolCall openai.ToolCall, mcpClient interface {
 	CallTool(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error)
 }) (*mcp.CallToolResult, error) {
-	request := mcp.CallToolRequest{
-		Params: struct {
-			Name      string                 `json:"name"`
-			Arguments map[string]interface{} `json:"arguments,omitempty"`
-			Meta      *struct {
-				ProgressToken mcp.ProgressToken `json:"progressToken,omitempty"`
-			} `json:"_meta,omitempty"`
-		}{
-			Name:      toolCall.Name,
-			Arguments: toolCall.Args,
-		},
-	}
+	request := mcp.CallToolRequest{}
+	request.Params.Name = toolCall.Name
+	request.Params.Arguments = toolCall.Args
+
 	return mcpClient.CallTool(ctx, request)
 }
 

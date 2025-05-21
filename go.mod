@@ -16,6 +16,8 @@ require (
 	github.com/slack-go/slack v0.16.0
 )
 
+replace github.com/awslabs/aws-lambda-go-api-proxy v0.16.2 => github.com/drone-ah/aws-lambda-go-api-proxy v0.0.0-20231109112037-3adb6b77e062
+
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/internal v1.11.0 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.6.1 // indirect
@@ -63,7 +65,6 @@ require (
 
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.18.0
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	go.uber.org/zap v1.27.0
 )

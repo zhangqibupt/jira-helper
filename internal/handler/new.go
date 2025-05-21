@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -9,7 +8,7 @@ import (
 	"jira_helper/internal/service/openai"
 	"jira_helper/internal/storage"
 	"log"
-	"os"
+	"sync"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -26,6 +25,9 @@ type SlackHandler struct {
 	tokenStore       storage.TokenStore
 	msgFormatter     *ToolMessageFormatter
 	defaultJiraToken string // Default Jira token
+
+	mcpInitOnce sync.Once
+	mcpInitErr  error
 }
 
 // HistoryMessage represents a message in the conversation history
@@ -35,96 +37,7 @@ type HistoryMessage struct {
 }
 
 func NewSlackHandler(token string, aiEndpoint string, aiKey string, aiDeployment string, defaultJiraToken string, tokenStore storage.TokenStore) (*SlackHandler, error) {
-	// Ensure cache directory exists
-	cacheDir := "/tmp/uvx-cache"
-	if err := os.MkdirAll(cacheDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create cache directory: %v", err)
-	}
-
 	logger.GetLogger().Info("Starting uvx client with debug logging enabled")
-
-	// Create log file for uvx output
-	logFile, err := os.OpenFile("/tmp/uvx.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create uvx log file: %v", err)
-	}
-	logFile.Close()
-
-	// Initialize the default MCP client with the default token
-	defaultMcpClient, err := client.NewStdioMCPClient(
-		"uvx", []string{
-			"UV_CACHE_DIR=/tmp/uvx-cache",
-			"UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple",
-		},
-		"mcp-atlassian",
-		"--jira-url=https://jira.freewheel.tv",
-		fmt.Sprintf("--jira-personal-token=%s", defaultJiraToken),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create default MCP client: %v", err)
-	}
-
-	// Set up a goroutine to monitor the log file
-	go func() {
-		readLogFile, err := os.OpenFile("/tmp/uvx.log", os.O_RDONLY, 0644)
-		if err != nil {
-			logger.GetLogger().Error("failed to open uvx log file for reading", zap.Error(err))
-			return
-		}
-		defer readLogFile.Close()
-
-		if _, err := readLogFile.Seek(0, 2); err != nil {
-			logger.GetLogger().Error("failed to seek to end of uvx log file", zap.Error(err))
-			return
-		}
-
-		scanner := bufio.NewScanner(readLogFile)
-		for {
-			for scanner.Scan() {
-				logger.GetLogger().Debug("uvx log", zap.String("message", scanner.Text()))
-			}
-			if err := scanner.Err(); err != nil {
-				logger.GetLogger().Error("error reading uvx log file", zap.Error(err))
-				return
-			}
-			time.Sleep(100 * time.Millisecond)
-			currentPos, err := readLogFile.Seek(0, 1)
-			if err != nil {
-				logger.GetLogger().Error("failed to get current file position", zap.Error(err))
-				return
-			}
-			fileInfo, err := readLogFile.Stat()
-			if err != nil {
-				logger.GetLogger().Error("failed to get file info", zap.Error(err))
-				return
-			}
-			if currentPos < fileInfo.Size() {
-				continue
-			}
-		}
-	}()
-
-	initRequest := mcp.InitializeRequest{}
-	initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
-	initRequest.Params.ClientInfo = mcp.Implementation{
-		Name:    "test-client",
-		Version: "1.0.0",
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-	logger.GetLogger().Info("Initializing MCP client")
-	initResult, err := defaultMcpClient.Initialize(ctx, initRequest)
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			logger.GetLogger().Fatal("MCP client initialization timed out")
-		} else {
-			logger.GetLogger().Fatal("MCP client initialization failed", zap.Error(err))
-		}
-		return nil, fmt.Errorf("failed to initialize MCP client: %v", err)
-	}
-
-	log.Printf("Successfully initialized client: %v", initResult)
-
 	aiClient, err := openai.NewClient(aiEndpoint, aiKey, aiDeployment)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create OpenAI client: %v", err)
@@ -132,25 +45,62 @@ func NewSlackHandler(token string, aiEndpoint string, aiKey string, aiDeployment
 
 	return &SlackHandler{
 		api:              slack.New(token),
-		defaultMcpClient: defaultMcpClient,
+		defaultMcpClient: nil, // 延迟初始化
 		aiClient:         aiClient,
 		tokenStore:       tokenStore,
 		defaultJiraToken: defaultJiraToken,
 	}, nil
 }
 
+// 延迟初始化 defaultMcpClient
+func (h *SlackHandler) ensureDefaultMcpClient() error {
+	h.mcpInitOnce.Do(func() {
+		defaultMcpClient, err := client.NewStdioMCPClient(
+			"uvx",
+			[]string{},
+			"--offline",
+			"mcp-atlassian",
+			"-v",
+			"--jira-url=https://jira.freewheel.tv",
+			fmt.Sprintf("--jira-personal-token=%s", h.defaultJiraToken),
+		)
+		if err != nil {
+			h.mcpInitErr = fmt.Errorf("failed to create default MCP client: %v", err)
+			return
+		}
+		initRequest := mcp.InitializeRequest{}
+		initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
+		initRequest.Params.ClientInfo = mcp.Implementation{
+			Name:    "test-client",
+			Version: "1.0.0",
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
+		defer cancel()
+		logger.GetLogger().Info("Initializing MCP client (lazy)")
+		initResult, err := defaultMcpClient.Initialize(ctx, initRequest)
+		if err != nil {
+			h.mcpInitErr = fmt.Errorf("failed to initialize MCP client: %v", err)
+			return
+		}
+		log.Printf("Successfully initialized client: %v", initResult)
+		h.defaultMcpClient = defaultMcpClient
+	})
+	return h.mcpInitErr
+}
+
 // getMcpClient returns the default MCP client if userToken is empty, otherwise creates a new MCP client with the user token.
 // The returned cleanup function should be called after using the client if it is not the default client.
 func (h *SlackHandler) getMcpClient(userToken string) (*client.Client, func(), error) {
 	if userToken == "" {
+		if err := h.ensureDefaultMcpClient(); err != nil {
+			return nil, nil, err
+		}
 		// Use the default client, no cleanup needed
 		return h.defaultMcpClient, func() {}, nil
 	}
 	// Create a new MCP client with the user-supplied token
 	mcpClient, err := client.NewStdioMCPClient(
-		"uvx", []string{
-			//"UV_OFFLINE=1", // The required dependency for uvx should be cached in docker image
-		},
+		"uvx", []string{},
 		"mcp-atlassian",
 		"--jira-url=https://jira.freewheel.tv",
 		fmt.Sprintf("--jira-personal-token=%s", userToken),

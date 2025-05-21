@@ -10,6 +10,9 @@ GOOS=linux
 GOARCH=arm64
 GO_BUILD_FLAGS=-ldflags="-s -w"
 
+AWS_ACCOUNT_ID=849725503339
+AWS_REGION=us-east-1
+
 all: clean build zip
 
 build:
@@ -48,9 +51,9 @@ docker-build: build
 
 docker-push: docker-build
 	@echo "Pushing Docker image to ECR..."
-	aws ecr get-login-password --region $(AWS_REGION) | docker login --username AWS --password-stdin $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com
-	docker tag jira-helper:latest $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/jira-helper:latest
-	docker push $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/jira-helper:latest
+	#aws ecr get-login-password --region $(AWS_REGION) | docker login --username AWS --password-stdin $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com
+	docker tag jira-helper:latest $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/qzhang/jira-helper:latest
+	docker push $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/qzhang/jira-helper:latest
 
 # Show help
 help:
