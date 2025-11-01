@@ -2,12 +2,10 @@ package handler
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"jira_helper/internal/logger"
 	"jira_helper/internal/service/openai"
 	"jira_helper/internal/storage"
-	"log"
 	"sync"
 	"time"
 
@@ -52,44 +50,61 @@ func NewSlackHandler(token string, aiEndpoint string, aiKey string, aiDeployment
 	}, nil
 }
 
-// 延迟初始化 defaultMcpClient
+// initializeMcpClient handles the common initialization logic for MCP clients
+func (h *SlackHandler) initializeMcpClient(mcpClient *client.Client, timeout time.Duration) error {
+	initRequest := mcp.InitializeRequest{}
+	initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
+	initRequest.Params.ClientInfo = mcp.Implementation{
+		Name:    "test-client",
+		Version: "1.0.0",
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	logger.GetLogger().Info("Initializing MCP client")
+	initResult, err := mcpClient.Initialize(ctx, initRequest)
+	if err != nil {
+		logger.GetLogger().Fatal("MCP client initialization failed", zap.Error(err))
+		return fmt.Errorf("failed to initialize MCP client: %v", err)
+	}
+
+	logger.GetLogger().Info(fmt.Sprintf("Successfully initialized client: %v", initResult))
+	return nil
+}
+
+// CreateMcpClient creates a new MCP client with the given token
+func (h *SlackHandler) CreateMcpClient(token string) (*client.Client, error) {
+	return client.NewStdioMCPClient(
+		"uvx",
+		[]string{
+			"UV_TOOL_DIR=/tmp/uvx-tool",
+			"UV_CACHE_DIR=/tmp/uvx-cache",
+			fmt.Sprintf("JIRA_API_TOKEN=%s", token),
+			"JIRA_URL=https://jira.freewheel.tv",
+		},
+		"run",
+		"mcp-atlassian",
+	)
+}
+
 func (h *SlackHandler) ensureDefaultMcpClient() error {
 	h.mcpInitOnce.Do(func() {
-		defaultMcpClient, err := client.NewStdioMCPClient(
-			"uvx",
-			[]string{},
-			"--offline",
-			"mcp-atlassian",
-			"-v",
-			"--jira-url=https://jira.freewheel.tv",
-			fmt.Sprintf("--jira-personal-token=%s", h.defaultJiraToken),
-		)
+		defaultMcpClient, err := h.CreateMcpClient(h.defaultJiraToken)
 		if err != nil {
 			h.mcpInitErr = fmt.Errorf("failed to create default MCP client: %v", err)
 			return
 		}
-		initRequest := mcp.InitializeRequest{}
-		initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
-		initRequest.Params.ClientInfo = mcp.Implementation{
-			Name:    "test-client",
-			Version: "1.0.0",
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
-		defer cancel()
-		logger.GetLogger().Info("Initializing MCP client (lazy)")
-		initResult, err := defaultMcpClient.Initialize(ctx, initRequest)
-		if err != nil {
-			h.mcpInitErr = fmt.Errorf("failed to initialize MCP client: %v", err)
+
+		if err := h.initializeMcpClient(defaultMcpClient, 1*time.Minute); err != nil {
+			h.mcpInitErr = err
 			return
 		}
-		log.Printf("Successfully initialized client: %v", initResult)
+
 		h.defaultMcpClient = defaultMcpClient
 	})
 	return h.mcpInitErr
 }
 
-// getMcpClient returns the default MCP client if userToken is empty, otherwise creates a new MCP client with the user token.
-// The returned cleanup function should be called after using the client if it is not the default client.
 func (h *SlackHandler) getMcpClient(userToken string) (*client.Client, func(), error) {
 	if userToken == "" {
 		if err := h.ensureDefaultMcpClient(); err != nil {
@@ -98,37 +113,17 @@ func (h *SlackHandler) getMcpClient(userToken string) (*client.Client, func(), e
 		// Use the default client, no cleanup needed
 		return h.defaultMcpClient, func() {}, nil
 	}
+
 	// Create a new MCP client with the user-supplied token
-	mcpClient, err := client.NewStdioMCPClient(
-		"uvx", []string{},
-		"mcp-atlassian",
-		"--jira-url=https://jira.freewheel.tv",
-		fmt.Sprintf("--jira-personal-token=%s", userToken),
-	)
+	mcpClient, err := h.CreateMcpClient(userToken)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	initRequest := mcp.InitializeRequest{}
-	initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
-	initRequest.Params.ClientInfo = mcp.Implementation{
-		Name:    "test-client",
-		Version: "1.0.0",
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-	logger.GetLogger().Info("Initializing MCP client")
-	initResult, err := mcpClient.Initialize(ctx, initRequest)
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			logger.GetLogger().Fatal("MCP client initialization timed out")
-		} else {
-			logger.GetLogger().Fatal("MCP client initialization failed", zap.Error(err))
-		}
-		return nil, nil, fmt.Errorf("failed to initialize MCP client: %v", err)
+	if err := h.initializeMcpClient(mcpClient, 2*time.Minute); err != nil {
+		return nil, nil, err
 	}
 
-	logger.GetLogger().Info(fmt.Sprintf("Successfully initialized client: %v", initResult))
 	return mcpClient, func() {
 		if err := mcpClient.Close(); err != nil {
 			logger.GetLogger().Error("failed to close MCP client", zap.Error(err))

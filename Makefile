@@ -39,6 +39,13 @@ run-local:
 	@echo "Building and running locally..."
 	go run ./cmd/lambda
 
+run-local-docker:
+	@echo "Building and running locally..."
+	make build
+	make docker-build
+	docker-compose down
+	docker-compose up
+
 deps:
 	@echo "Downloading dependencies..."
 	go mod download

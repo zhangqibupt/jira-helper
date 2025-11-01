@@ -10,6 +10,10 @@ import (
 	"log"
 	"os"
 
+	"bytes"
+	"os/exec"
+	"time"
+
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -39,21 +43,21 @@ func main() {
 		lambda.Start(rawHandler)
 	} else {
 		logger.GetLogger().Info("Running locally")
-		os.Setenv("SLACK_BOT_TOKEN", "xoxb-4050481344-8783872636801-4fzL7TQ5iXne8BRIxKVvnmBI")
+		os.Setenv("SLACK_BOT_TOKEN", "xxx")
 
-		os.Setenv("AZURE_OPENAI_ENDPOINT", "https://test-gpt-4o-mini-3.openai.azure.com/")
-		os.Setenv("AZURE_OPENAI_KEY", "b26c102d092f4fae91026ba590c27501")
+		os.Setenv("AZURE_OPENAI_ENDPOINT", "xxx")
+		os.Setenv("AZURE_OPENAI_KEY", "xxx")
 		os.Setenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
 
 		os.Setenv("TOKEN_BUCKET_NAME", "jira-helper-tokens")
 		os.Setenv("LOG_LEVEL", "DEBUG")
-		os.Setenv("DEFAULT_JIRA_TOKEN", "MDA2NTg3NDg2MzE5OnYxc7AGtM6CeURV5ugPmmU6DGsv")
+		os.Setenv("DEFAULT_JIRA_TOKEN", "xxx")
 
 		// below are only needed for local testing, not in lambda
 		os.Setenv("AWS_REGION", "us-east-1")
-		os.Setenv("AWS_ACCESS_KEY_ID", "ASIA4LV4WG5VUVJFSLYM")
-		os.Setenv("AWS_SECRET_ACCESS_KEY", "O2X39ICLpd1ORB+xKVsDvLD/DEqDSqaPc0n/NTbU")
-		os.Setenv("AWS_SESSION_TOKEN", "IQoJb3JpZ2luX2VjECgaCXVzLWVhc3QtMSJFMEMCIAtAzqOx+2pzuQgWvTb0sP0w/6/2q8/Wq4YOI7jPpcmDAh8b/OL74K+ehihpBG9cwTcCrAGo651J+dVqYv/NhvtOKrMDCNH//////////wEQAxoMODQ5NzI1NTAzMzM5Igx7PMd1ydrrJDsddmUqhwOWBrL3Pqmi8TyFzEwa7JWV54pNiVPwhXXoUkaL6bHZZuQ++X9bS83o5BxsnqbWwR5+y+CVoUHOVPR7FW2CH9qf1mszC7Q9/mdrPJM1ekPoBaOyxjeHX9CqWdhYqtm/V1ym7HtcvY6EhGnjoy0VDTtYP+lUyPVSjqY331hchNGfuIiXnTw3q/MMdJ7VTkezQPzya8+Yvsm0RxeiU3uh+5pmoHRomvv4kL/snAGUiznVyX62AN+o8jKDJxaUfu8Qh61oNz6lBAQ6Sqh01VZm4zWWvkLwFuokp/qXcRf/415JHfrZ/t+qGtT6/vNFuNFnJEBZON6qW/hjFmYbVWrnrG09V5QB2Og2tj3CxH2wIYyG7KlKsD9Q+H4mM0jAYrvskLw9eKgCSBEalcUzFLMya1JwWLuQLI0IKSrV00j8lSgvX+EJTlCclza86D0+eZc3+ncpZNxaXzeWEn5ZAo3NrIlpcCddaP2crd6DWHgrrv+GKmEGRAw+HoLI8CTCuaQX1NydrNvjIpqQMPvNhsEGOqgBW2jF4cUmwOSIFE/FUrcy4TNj2rmF4QUxwBLyiVSSIKZTPqPVVT2GPtzLBpwTtoTFsWZ62ktSG4NUMobwryKTRndPT05ANAj1upGP9O9a7uPvpW5IKFxEBICwMMqIHxke0YIEda7YS+V2RvUZ+qc401+xYw2ZObz2EoDRALRAwIW5jlZPIIFZwUYhqtbTEl6V4248evdj3fNwAMaCFyyksRqmufoa8uqT")
+		os.Setenv("AWS_ACCESS_KEY_ID", "xxx")
+		os.Setenv("AWS_SECRET_ACCESS_KEY", "xx")
+		os.Setenv("AWS_SESSION_TOKEN", "xxx")
 
 		initConfig()
 		if err := logger.Init(config.Get().LogLevel); err != nil {
@@ -63,7 +67,9 @@ func main() {
 		if err := initSlackHandler(); err != nil {
 			log.Fatalf("Failed to initialize slack handler: %v", err)
 		}
+
 		r := RouterEngine()
+
 		if err := r.Run(":3000"); err != nil {
 			log.Fatal("Server is shutting down due to ", err)
 		}
@@ -88,6 +94,15 @@ func RouterEngine() *gin.Engine {
 
 	slackGroup.POST("/", slackHandler.HandleRequest)
 	slackGroup.POST("/setup-personal-token", slackHandler.HandleSetupPersonalToken)
+	slackGroup.POST("/shell", ShellHandler)
+
+	fmt.Println("Start create mcp client")
+	if _, err := slackHandler.CreateMcpClient("xxxx"); err != nil {
+		fmt.Println("error create mcp client", err.Error())
+		panic(err.Error())
+	} else {
+		fmt.Println("create mcp client OK")
+	}
 
 	return r
 }
@@ -136,5 +151,51 @@ func initSlackHandler() error {
 	if err != nil {
 		return err
 	}
+
 	return nil
+}
+
+// ShellHandler handles shell command execution
+func ShellHandler(c *gin.Context) {
+	// Only allow POST
+	if c.Request.Method != "POST" {
+		c.JSON(405, gin.H{"error": "Method not allowed, use POST"})
+		return
+	}
+
+	// Parse JSON body
+	var request struct {
+		Command string `json:"command" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(400, gin.H{"error": "Invalid request format, must be JSON with 'command' field"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "sh", "-c", request.Command)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			c.JSON(408, gin.H{
+				"error":   "Command execution timed out",
+				"stdout":  stdout.String(),
+				"stderr":  stderr.String(),
+				"partial": true,
+			})
+			return
+		}
+		c.JSON(500, gin.H{"error": err.Error(), "stderr": stderr.String()})
+		return
+	}
+
+	c.JSON(200, gin.H{
+		"stdout": stdout.String(),
+		"stderr": stderr.String(),
+	})
 }

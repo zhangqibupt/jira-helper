@@ -1,7 +1,7 @@
 version: '3'
 services:
   app:
-    image: qzhang/jira-helper
+    image: qzhang/jira-helper:latest
     ports:
       - "3000:3000"
     stdin_open: true  # 相当于 docker run -i
